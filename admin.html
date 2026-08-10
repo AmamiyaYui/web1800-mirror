@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚙️ 留言板管理 · 蒸汽都市</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #14181d; color: #cfd8dc; font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh; padding: 20px;
+  }
+  h1 { font-size: 20px; color: #ffd54f; margin-bottom: 16px; }
+  .card {
+    background: #1c2229; border: 1px solid #2a313a; border-radius: 8px;
+    padding: 14px; margin-bottom: 12px;
+  }
+  .login-row { display: flex; gap: 8px; max-width: 420px; }
+  input, textarea {
+    background: #14181d; color: #e8e8e8; border: 1px solid #37474f;
+    border-radius: 4px; padding: 7px 10px; font-size: 14px; width: 100%;
+  }
+  input:focus, textarea:focus { outline: none; border-color: #ffd54f; }
+  button {
+    background: #37474f; color: #cfd8dc; border: 1px solid #455a63;
+    border-radius: 4px; padding: 7px 14px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: #455a64; }
+  button.primary { background: #f57f17; color: #1a1d23; border-color: #f57f17; font-weight: bold; }
+  button.danger { background: #4a2c2c; color: #ef9a9a; border-color: #5f3a3a; }
+  button.danger:hover { background: #5f3a3a; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .toolbar .count { color: #8a8f98; font-size: 13px; }
+  .msg { border-bottom: 1px dashed #2a313a; padding: 10px 2px; }
+  .msg-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  .nick { color: #ffd54f; font-weight: bold; }
+  .nick.dev { color: #81c784; }
+  .time { color: #666e7a; font-size: 12px; }
+  .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 10px; font-weight: bold;
+  }
+  .badge.new { background: #1a3a5f; color: #64b5f6; }
+  .badge.replied { background: #1d3a2a; color: #81c784; }
+  .badge.done { background: #333a45; color: #9aa4b2; }
+  .msg-text { margin: 6px 0; font-size: 14px; line-height: 1.6; color: #e8e8e8; word-break: break-word; }
+  .msg-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .msg-actions button { padding: 3px 10px; font-size: 12px; }
+  .reply { margin: 8px 0 4px 22px; padding: 8px 10px; background: rgba(129, 199, 132, 0.08); border-left: 3px solid #81c784; border-radius: 4px; }
+  .reply .nick { color: #81c784; }
+  .reply .msg-text { font-size: 13px; }
+  .reply-box { margin: 8px 0 4px 22px; display: flex; gap: 6px; align-items: flex-start; }
+  .reply-box textarea { flex: 1; font-size: 13px; min-height: 40px; resize: vertical; }
+  .empty { color: #666e7a; text-align: center; padding: 30px 0; }
+  #login { max-width: 480px; margin: 60px auto; }
+  #login .card { text-align: center; }
+  #login .hint { color: #8a8f98; font-size: 12px; margin-top: 10px; }
+  .err { color: #ef9a9a; font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="card">
+    <h1>⚙️ 留言板管理</h1>
+    <div class="login-row">
+      <input type="password" id="pw" placeholder="管理密码" autocomplete="current-password">
+      <button class="primary" id="btn-login">登录</button>
+    </div>
+    <div class="err" id="login-err"></div>
+    <div class="hint">蒸汽都市 · 开发者后台(与游戏留言板同一数据源)</div>
+  </div>
+</div>
+
+<div id="panel" class="hidden">
+  <div class="toolbar">
+    <h1 style="margin:0">⚙️ 留言板管理</h1>
+    <span class="count" id="count"></span>
+    <button id="btn-refresh">🔄 刷新</button>
+    <button class="danger" id="btn-clear">🧹 清空全部</button>
+    <button id="btn-logout" style="margin-left:auto">退出</button>
+  </div>
+  <div id="list"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var API = '/api/messages';
+  var key = sessionStorage.getItem('msgboard-admin-key') || '';
+  var listEl = document.getElementById('list');
+  var countEl = document.getElementById('count');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmt(ts) {
+    var d = new Date(Number(ts));
+    if (isNaN(d)) return '';
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate() + ' ' +
+      String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  function badge(s) {
+    return { new: '新', replied: '已回复', done: '已处理' }[s] || s;
+  }
+  function req(method, path, body) {
+    var headers = { 'Content-Type': 'application/json' };
+    if (key) headers['X-Admin-Key'] = key;
+    return fetch(API + (path || ''), {
+      method: method,
+      headers: headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  function showLogin() {
+    document.getElementById('login').classList.remove('hidden');
+    document.getElementById('panel').classList.add('hidden');
+  }
+  function showPanel() {
+    document.getElementById('login').classList.add('hidden');
+    document.getElementById('panel').classList.remove('hidden');
+    load();
+  }
+
+  document.getElementById('btn-login').onclick = async function () {
+    var pw = document.getElementById('pw').value.trim();
+    if (!pw) return;
+    key = pw;
+    try {
+      var res = await req('GET');
+      if (res.status === 401) { key = ''; document.getElementById('login-err').textContent = '密码错误'; return; }
+      if (!res.ok) throw new Error(String(res.status));
+      sessionStorage.setItem('msgboard-admin-key', pw);
+      document.getElementById('login-err').textContent = '';
+      showPanel();
+    } catch (e) {
+      document.getElementById('login-err').textContent = '无法连接服务器';
+    }
+  };
+  document.getElementById('btn-logout').onclick = function () {
+    key = '';
+    sessionStorage.removeItem('msgboard-admin-key');
+    showLogin();
+  };
+
+  function render(msgs) {
+    if (!msgs || !msgs.length) {
+      listEl.innerHTML = '<div class="empty">暂无留言</div>';
+      countEl.textContent = '0 条';
+      return;
+    }
+    var tops = msgs.filter(function (m) { return !m.parent_id; });
+    countEl.textContent = tops.length + ' 条留言';
+    var html = '';
+    tops.forEach(function (m) {
+      html += '<div class="msg" data-id="' + m.id + '">';
+      html += '<div class="msg-head"><span class="nick">' + esc(m.nick) + '</span>' +
+        '<span class="time">' + fmt(m.ts) + '</span>' +
+        '<span class="badge ' + esc(m.status) + '">' + badge(m.status) + '</span></div>';
+      html += '<div class="msg-text">' + esc(m.text) + '</div>';
+      // 回复
+      msgs.filter(function (r) { return r.parent_id === m.id; }).forEach(function (r) {
+        html += '<div class="reply"><div class="msg-head"><span class="nick dev">' + esc(r.nick) + '</span>' +
+          '<span class="time">' + fmt(r.ts) + '</span></div>' +
+          '<div class="msg-text">' + esc(r.text) + '</div></div>';
+      });
+      // 操作
+      html += '<div class="msg-actions">' +
+        '<button data-act="reply">💬 回复</button>' +
+        (m.status !== 'done' ? '<button data-act="done">✅ 已处理</button>' : '') +
+        '<button data-act="del" class="danger">🗑 删除</button></div>' +
+        '<div class="reply-box hidden"><textarea placeholder="以 ⚙️ 镇长 身份回复…"></textarea>' +
+        '<button data-act="send-reply" class="primary">发送</button></div>';
+      html += '</div>';
+    });
+    listEl.innerHTML = html;
+  }
+
+  async function load() {
+    try {
+      var res = await req('GET');
+      if (res.status === 401) { showLogin(); return; }
+      if (!res.ok) throw new Error(String(res.status));
+      render(await res.json());
+    } catch (e) {
+      listEl.innerHTML = '<div class="empty">加载失败</div>';
+    }
+  }
+
+  listEl.onclick = async function (ev) {
+    var btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    var msgEl = btn.closest('.msg');
+    var id = Number(msgEl.getAttribute('data-id'));
+    var act = btn.getAttribute('data-act');
+
+    if (act === 'reply') {
+      var box = msgEl.querySelector('.reply-box');
+      box.classList.toggle('hidden');
+      if (!box.classList.contains('hidden')) box.querySelector('textarea').focus();
+      return;
+    }
+    if (act === 'send-reply') {
+      var ta = msgEl.querySelector('.reply-box textarea');
+      var text = ta.value.trim();
+      if (!text) return;
+      try {
+        var res = await req('POST', '', { parent_id: id, text: text });
+        if (!res.ok) throw new Error(String(res.status));
+        load();
+      } catch (e) { alert('回复失败'); }
+      return;
+    }
+    if (act === 'done') {
+      try {
+        var res2 = await req('POST', '', { id: id, status: 'done' });
+        if (!res2.ok) throw new Error(String(res2.status));
+        load();
+      } catch (e) { alert('操作失败'); }
+      return;
+    }
+    if (act === 'del') {
+      if (!confirm('删除这条留言及其回复?')) return;
+      try {
+        var res3 = await req('DELETE', '/' + id);
+        if (!res3.ok) throw new Error(String(res3.status));
+        load();
+      } catch (e) { alert('删除失败'); }
+      return;
+    }
+  };
+
+  document.getElementById('btn-refresh').onclick = load;
+  document.getElementById('btn-clear').onclick = async function () {
+    if (!confirm('确定清空全部留言?此操作不可撤销!')) return;
+    try {
+      var res = await req('DELETE', '');
+      if (!res.ok) throw new Error(String(res.status));
+      load();
+    } catch (e) { alert('清空失败'); }
+  };
+
+  // 自动登录
+  if (key) {
+    req('GET').then(function (res) {
+      if (res.status === 401) showLogin();
+      else showPanel();
+    }).catch(function () { showLogin(); });
+  } else {
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>

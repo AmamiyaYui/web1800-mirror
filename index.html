@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>蒸汽都市</title>
+  <link rel="stylesheet" href="style.css?v=129">
+</head>
+<body>
+  <!-- [V1.5] 背景底:地图画布铺满全窗,支持右键拖拽平移视野 -->
+  <div id="map-container">
+    <canvas id="map"></canvas>
+  </div>
+
+  <!-- 上覆盖层:设置 / 信息面板 / 打赏 -->
+  <header id="topbar">
+    <div class="top-section" id="settings-sec">
+      <span class="zone-label">⚙️ 设置</span>
+      <span class="ctl-label">速度</span>
+      <div id="speed-buttons">
+        <button id="btn-pause">⏸</button>
+        <button id="btn-speed-1">1x</button>
+        <button id="btn-speed-2" class="active">2x</button>
+        <button id="btn-speed-3">3x</button>
+      </div>
+      <span id="speed-display">▶ 2x</span>
+    </div>
+    <div class="top-section" id="time-sec">
+      <span class="zone-label">📅 时间</span>
+      <span id="time-display">第 1 天 00:00</span>
+    </div>
+    <div class="top-section" id="info-sec">
+      <span class="zone-label">📋 信息</span>
+      <button id="btn-announce" class="mini-btn">📢 公告</button>
+      <button id="btn-guide" class="mini-btn">📖 机制速览</button>
+      <button id="btn-chains" class="mini-btn">📊 生产链</button>
+      <button id="btn-legend" class="mini-btn">🎨 图例</button>
+    </div>
+    <div class="top-section" id="donate-sec">
+      <span class="dev-hint">开发中版本频繁更新,若出现操作无响应的情况请刷新页面,有建议/bug反馈欢迎留言板留言🤗</span>
+      <button id="btn-reset" class="reset-btn">🔄 重置存档</button>
+      <button id="btn-msgboard" class="reset-btn">💬 留言板</button>
+      <button id="btn-donate" class="donate-btn">❤️ 打赏</button>
+    </div>
+  </header>
+
+  <!-- 左覆盖层:经济信息(可伸缩 + Tab 切换:资源/需求/人口)[UI改造 A2+B2] -->
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="side-title">📊 面板</span>
+      <button id="btn-side-collapse" class="side-collapse" title="收起侧栏">◀</button>
+    </div>
+    <div class="side-tabs" id="left-tabs">
+      <button class="tab-btn active" data-side="left" data-tab="res"><span class="tab-ico">📊</span><span class="tab-lbl">资源</span></button>
+      <button class="tab-btn" data-side="left" data-tab="need"><span class="tab-ico">🍽️</span><span class="tab-lbl">需求</span></button>
+      <button class="tab-btn" data-side="left" data-tab="pop"><span class="tab-ico">👷</span><span class="tab-lbl">人口</span></button>
+    </div>
+    <div class="tab-body">
+      <div class="tab-panel active" data-panel="res"><div id="economy-res">加载中…</div></div>
+      <div class="tab-panel" data-panel="need"><div id="economy-need">加载中…</div></div>
+      <div class="tab-panel" data-panel="pop"><div id="economy-pop">加载中…</div></div>
+    </div>
+  </aside>
+
+  <!-- 右覆盖层:目标与反馈(可伸缩 + Tab 切换:目标/反馈/详情)[UI改造 A2+B2] -->
+  <aside id="right">
+    <div class="side-head">
+      <span class="side-title">🎮 状态</span>
+      <button id="btn-right-collapse" class="side-collapse" title="收起面板">▶</button>
+    </div>
+    <div class="side-tabs" id="right-tabs">
+      <button class="tab-btn active" data-side="right" data-tab="goal"><span class="tab-ico">🎯</span><span class="tab-lbl">目标</span></button>
+      <button class="tab-btn" data-side="right" data-tab="feed"><span class="tab-ico">💬</span><span class="tab-lbl">反馈</span></button>
+      <button class="tab-btn" data-side="right" data-tab="info"><span class="tab-ico">🏗️</span><span class="tab-lbl">详情</span></button>
+    </div>
+    <div class="tab-body">
+      <div class="tab-panel active" data-panel="goal">
+        <div class="panel">
+          <div class="panel-title">🎯 目标</div>
+          <div id="goal">📋 加载中…</div>
+        </div>
+      </div>
+      <div class="tab-panel" data-panel="feed">
+        <div class="panel">
+          <div class="panel-title">💬 反馈</div>
+          <div id="stats" class="stats-row"></div>
+          <!-- [H-04] 异常建筑列表(点击统计数字展开,条目可定位) -->
+          <div id="issue-list"></div>
+          <div id="log"></div>
+        </div>
+      </div>
+      <div class="tab-panel" data-panel="info">
+        <div class="panel">
+          <div class="panel-title">🏗️ 建筑详情</div>
+          <div id="info">点击建筑查看详情 · 右键拖拽移动地图</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 下覆盖层:城市操作(固定) + 建设区(按阶级切页) -->
+  <footer id="bottombar">
+    <div id="bb-top">
+      <div id="tools-sec">
+        <span class="zone-label">🔧 城市操作</span>
+        <button id="btn-inspect" class="mode-btn active">🔍 查看</button>
+        <button id="btn-move" class="mode-btn" title="移动建筑:点击后选择建筑,再点击目标位置">🚚 移动</button>
+        <button id="btn-road" class="mode-btn">🛣️ 铺路</button>
+        <button id="btn-demolish" class="mode-btn">💥 拆除</button>
+        <!-- [H-06] 模式提示条:持续显示当前操作与按键说明 -->
+        <span id="mode-hint" class="mode-hint"></span>
+        <span id="road-level-sec" style="display:none">
+          <button id="btn-road-dirt" class="mode-btn active" title="土路:建造 3/格,服务传播 34 格">🟫 土路 3/格</button>
+          <button id="btn-road-stone" class="mode-btn" title="石板路:在土路上升级 12/格,服务传播 1.5 倍">⬜ 升级石板 12/格</button>
+        </span>
+      </div>
+      <div id="build-tabs"></div>
+    </div>
+    <div id="build-menu"></div>
+  </footer>
+
+  <!-- [V1.8] 小地图(右下角,点击跳转) -->
+  <div id="minimap-wrap">
+    <canvas id="minimap" width="128" height="128"></canvas>
+  </div>
+
+  <!-- [V1.9] 地块图例 overlay -->
+  <div id="legend-overlay" class="overlay hidden">
+    <div class="overlay-box legend-box">
+      <div class="overlay-title">🎨 地块图例 <button id="btn-legend-close" class="mini-btn">✕</button></div>
+      <div class="legend-group">
+        <div class="legend-sub">🗺️ 地形</div>
+        <div class="legend-grid">
+          <span class="legend-item"><i class="swatch" style="background:#2e7d32"></i>平地(可建普通建筑)</span>
+          <span class="legend-item"><i class="swatch" style="background:#a1887f"></i>黏土(陶土矿场)</span>
+          <span class="legend-item"><i class="swatch" style="background:#78909c"></i>铁矿(铁矿场)</span>
+          <span class="legend-item"><i class="swatch" style="background:#d84315"></i>铜矿(铜矿场)</span>
+          <span class="legend-item"><i class="swatch" style="background:#ffd54f"></i>金矿(金矿场)</span>
+          <span class="legend-item"><i class="swatch" style="background:#37474f"></i>煤矿(煤矿场,工匠层)</span>
+          <span class="legend-item"><i class="swatch" style="background:#c0ca33"></i>锌矿(锌矿场,工程师)</span>
+          <span class="legend-item"><i class="swatch" style="background:#bcaaa4"></i>石灰岩(石灰岩矿场,工程师)</span>
+          <span class="legend-item"><i class="swatch" style="background:#1976d2"></i>水域(海岸建筑向海放置)</span>
+          <span class="legend-item"><i class="swatch" style="background:#5c6b7a"></i>山脉(不可建/不可铺路)</span>
+        </div>
+      </div>
+      <div class="legend-group">
+        <div class="legend-sub">🏗️ 建筑</div>
+        <div class="legend-grid">
+          <span class="legend-item"><i class="swatch" style="background:#f9a825"></i>仓库(物流起点,34 格服务)</span>
+          <span class="legend-item"><i class="swatch" style="background:#8d6e63"></i>民居(5 阶,可升级)</span>
+          <span class="legend-item"><i class="swatch" style="background:#26a69a"></i>生产建筑(需仓库覆盖)</span>
+          <span class="legend-item"><i class="swatch" style="background:#5c6bc0"></i>服务建筑(市场/酒吧/学校/大学等)</span>
+        </div>
+      </div>
+      <div class="legend-group">
+        <div class="legend-sub">🔍 标记</div>
+        <div class="legend-grid">
+          <span class="legend-item"><i class="swatch" style="background:#b5895a"></i>土路(建造 3/格)</span>
+          <span class="legend-item"><i class="swatch" style="background:#c9c9c9"></i>石板路(土路升级 12/格,服务 ×1.5)</span>
+          <span class="legend-item"><i class="swatch" style="background:rgba(92,107,192,0.25)"></i>淡蓝=仓库/服务覆盖道路</span>
+          <span class="legend-item">⚠ 断连(未连仓库,停工)</span>
+          <span class="legend-item">! 等待(缺原料/劳动力/超覆盖)</span>
+          <span class="legend-item"><i class="swatch" style="background:rgba(76,175,80,0.45)"></i>放置预览(绿=可放,红=不可;按 R 旋转)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- [V1.10 修订⑤ 顺序20] 打赏弹窗 + 留言板 -->
+  <div id="donate-overlay" class="overlay hidden">
+    <div class="overlay-box legend-box donate-box">
+      <div class="overlay-title">⚙️ 给蒸汽都市添块煤 <button id="btn-donate-close" class="mini-btn">✕</button></div>
+      <div class="donate-sub">蒸汽机要转,靠的是煤;这座小城要转,靠的是你的支持 🔥</div>
+      <div class="donate-tiers">
+        <button class="donate-tier active" data-tier="coffee">☕ 8.8 一杯咖啡喵~</button>
+        <button class="donate-tier" data-tier="meal">🍜 16.6 加班拼好饭喵~</button>
+        <button class="donate-tier" data-tier="tokens">🤖 66.6 开发tokens动力包喵~</button>
+      </div>
+      <div class="donate-pay-switch">
+        <button id="donate-wx" class="mini-btn active">💚 微信</button>
+        <button id="donate-zfb" class="mini-btn">💙 支付宝</button>
+      </div>
+      <img id="donate-qr" class="donate-qr" src="assets/qrcodes/wx-coffee.png" alt="收款码">
+      <div class="donate-hint">长按识别 / 扫码,心意到账 🧡</div>
+    </div>
+  </div>
+
+  <!-- [V1.10 修订⑤ 顺序23] 独立留言板弹窗(打赏拆出,放大) -->
+  <div id="msgboard-overlay" class="overlay hidden">
+    <div class="overlay-box legend-box msgboard-box">
+      <div class="overlay-title">💬 留言板 <button id="btn-msgboard-close" class="mini-btn" style="float:right">✕</button></div>
+      <div class="msgboard-sub">和镇长聊聊这座城吧~ 建议 / BUG 反馈都欢迎</div>
+      <div class="donate-board-input">
+        <input id="msg-nick" maxlength="12" placeholder="昵称(可空)">
+        <input id="msg-text" maxlength="100" placeholder="说点什么…">
+        <button id="btn-msg-send" class="mini-btn">投递</button>
+      </div>
+      <div id="msg-list" class="donate-msgs msgboard-msgs"><div class="donate-msg-empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- [V1.10 修订⑤ 顺序21] 欢迎弹窗(首次自动弹出 + 公告按钮可看) -->
+  <div id="welcome-overlay" class="overlay hidden">
+    <div class="overlay-box legend-box welcome-box">
+      <div class="overlay-title">🚂 呜——蒸汽都市到站啦!</div>
+      <div class="welcome-body">
+        <div class="welcome-text">欢迎市长喵~ 岛上的煤和土地都给你备好了,就等你放下第一座仓库。居民们已经排好队要搬进来啦喵!</div>
+        <div class="welcome-steps">
+          <div class="welcome-step">① 建造<strong>仓库</strong>(建筑菜单·服务类·500金币)——物流起点,生产建筑都要在仓库路覆盖内才能开工</div>
+          <div class="welcome-step">② <strong>铺路</strong>连接(土路 3/格)——建筑连上仓库的路,才算连通喵</div>
+          <div class="welcome-step">③ 建<strong>民居</strong>与<strong>渔场</strong>——满足居民需求(市场/鱼/工作服),人口涨到 50 就能解锁工人喵</div>
+        </div>
+        <div class="welcome-hint">操作方式(查看/铺路/拆除/R 旋转/滚轮缩放)和游戏信息(📖 机制速览 / 📊 生产链 / 🎨 图例)都在<strong>上边栏</strong>,随时可看~</div>
+        <div class="welcome-dev">🔧 开发中版本,有建议 / 发现 BUG,欢迎到「💬 留言板」留言~</div>
+        <div class="welcome-updates">
+          <div class="welcome-updates-title">🆕 最近更新</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> UI 改造:左右侧栏可伸缩(收起后为图标列,点图标直接展开对应面板)+ 面板改为菜单式 Tab 切换(左:资源/需求/人口,右:目标/反馈/详情),点击建筑自动切换到详情;侧栏状态自动记忆</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> 优化首屏体验:镜头自动定位岛屿核心区,紧凑视口顶部操作不再挤压,开始建造按钮保持可见</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> 监控与交互优化:速率改为 60 秒平滑值(不再 0/60 跳变)、资源栏"关注+折叠"、停工原因细分中文说明、异常建筑一键定位、建筑详情实时刷新、模式提示条、升级条件清单、目标快捷操作</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> 机制速览和项目说明已按当前版本统一:住宅升级需单栋满员,旋转锚点始终为建筑几何中心</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> 修复主循环仍使用旧收入公式的问题,金币收入现按各阶层需求、满足度与当前人口正确结算</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-10</strong> 移除森林地形并统一建筑中心锚点;旧存档中旋转过的建筑可能显示错位,<strong>建议重置存档</strong>重新开始</div>
+          <div class="welcome-update-item">✅ <strong>2026-08-09</strong> 修复需求消耗数值远大于预设数值的问题(消耗率按"每住宅每秒"口径修正,各阶层产线供需恢复正常)</div>
+        </div>
+      </div>
+      <div class="welcome-actions">
+        <button id="btn-welcome-start" class="mini-btn" style="font-size:15px;padding:8px 28px">⛏️ 开始建造</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- [V1.10 修订⑤ 顺序19] 重置存档确认弹窗(10 秒倒计时) -->
+  <div id="reset-modal" class="overlay hidden">
+    <div class="overlay-box legend-box" style="max-width:380px;text-align:center">
+      <div class="overlay-title">🔄 重置存档</div>
+      <div style="padding:10px;color:#ffcdd2">将删除当前存档并<strong>重新生成地图</strong>,此操作不可撤销!</div>
+      <div style="padding:6px;font-size:22px;font-weight:bold;color:#ffd54f" id="reset-countdown">10</div>
+      <div style="display:flex;gap:8px;justify-content:center;padding:10px">
+        <button id="btn-reset-cancel" class="mini-btn">取消</button>
+        <button id="btn-reset-confirm" class="mini-btn" disabled>确定(倒计时)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- [V1.10 修订⑤ 顺序16] 机制速览 overlay -->
+  <div id="guide-overlay" class="overlay hidden">
+    <div class="overlay-box legend-box">
+      <div class="overlay-title">📖 机制速览 <button id="btn-guide-close" class="mini-btn">✕</button></div>
+      <div id="guide-list"></div>
+    </div>
+  </div>
+
+  <!-- 生产链总览 overlay -->
+  <div id="chains-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <div class="overlay-title">生产链总览 <button id="btn-chains-close" class="mini-btn">✕</button></div>
+      <div id="chains-list"></div>
+    </div>
+  </div>
+
+  <!-- 引擎(加载顺序即依赖顺序) -->
+  <script src="src/engine/data/goods.js?v=129"></script>
+  <script src="src/engine/data/needs-data.js?v=129"></script>
+  <script src="src/engine/data/tiers.js?v=129"></script>
+  <script src="src/engine/data/buildings-data.js?v=129"></script>
+  <script src="src/engine/data/buildings.js?v=129"></script>
+  <script src="src/engine/data/map-template.js?v=129"></script>
+  <script src="src/engine/data/balance.js?v=129"></script>
+  <script src="src/engine/events.js?v=129"></script>
+  <script src="src/engine/state.js?v=129"></script>
+  <script src="src/engine/connectivity.js?v=129"></script>
+  <script src="src/engine/economy.js?v=129"></script>
+  <script src="src/engine/placement.js?v=129"></script>
+  <script src="src/engine/population.js?v=129"></script>
+  <script src="src/engine/goals.js?v=129"></script>
+  <script src="src/engine/chains.js?v=129"></script>
+  <script src="src/engine/tick.js?v=129"></script>
+  <script src="src/engine/save.js?v=129"></script>
+  <!-- 渲染与 UI -->
+  <script src="src/render/map-renderer.js?v=129"></script>
+  <script src="src/ui/economy.js?v=129"></script>
+  <script src="src/ui/goal.js?v=129"></script>
+  <script src="src/ui/build-menu.js?v=129"></script>
+  <script src="src/ui/panels.js?v=129"></script>
+  <script src="src/ui/mode.js?v=129"></script>
+  <script src="src/ui/guide.js?v=129"></script>
+  <script src="src/ui/chains-panel.js?v=129"></script>
+  <script src="src/ui/minimap.js?v=129"></script>
+  <script src="src/main.js?v=129"></script>
+</body>
+</html>

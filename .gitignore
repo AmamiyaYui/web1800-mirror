@@ -1,0 +1,8 @@
+node_modules/
+/data/
+docs/wiki-reference/
+docs/idea-to-project/parity.md
+deploy/
+*.log
+.DS_Store
+Thumbs.db

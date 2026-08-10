@@ -1,0 +1,14 @@
+{
+  "name": "web1800",
+  "version": "0.1.0",
+  "private": true,
+  "description": "零依赖浏览器工业时代城市模拟经营游戏",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/engine.test.mjs",
+    "serve": "python -m http.server 8000"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
