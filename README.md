@@ -24,15 +24,16 @@
 
 《蒸汽都市》把生产链、城市规划、人口需求和物流覆盖放进一个原生 JavaScript 模拟引擎中。
 
-- 128×128 种子海岛地图，包含水域、平地、山脉和多种矿脉
+- 160×160 主岛与可探索新岛，包含水域、平地、山脉、矿脉和区域禀赋
 - 生产链、周期生产、维护费、劳动力门槛和仓库覆盖
 - 农民、工人、工匠等人口阶层及独立需求
 - 3×3 住宅、住宅升级、道路等级和多格建筑 footprint
+- 造船、舰队调遣、近海探索和岛间持续运输
 - Canvas 地图、DOM HUD、生产链总览、小地图和昼夜表现
-- `localStorage` 自动存档及坏档保护
+- `localStorage` v2 世界存档、旧档迁移、永久原档备份和转移工具
 - Cloudflare Worker + D1 留言板，可在纯离线环境中降级
 
-当前公开镜像的数据规模为 64 种建筑、63 种商品/资源和 5 个人口阶层；自动化测试基线为 83/83。
+当前公开镜像的数据规模为 67 种建筑、64 种商品/资源和 5 个人口阶层；自动化测试基线为 174/174。
 
 ## 运行架构
 
@@ -67,10 +68,11 @@ flowchart TB
 | 层 | 目录 | 职责 |
 |---|---|---|
 | 数据层 | `src/engine/data/` | 商品、需求、建筑、地图和平衡数据 |
+| 世界与海事 | `world-data.js`、`ships.js`、`explorations.js`、`transport.js` | 多岛状态、船队、探索和岛间运输 |
 | 状态与模拟 | `src/engine/state.js`、`tick.js` | 初始状态、时间推进和顶层模拟编排 |
 | 领域逻辑 | `economy.js`、`population.js` | 生产、维护费、人口、需求、幸福度与收入 |
 | 空间规则 | `placement.js`、`connectivity.js` | footprint、旋转、放置、道路与仓库连通 |
-| 存档 | `save.js` | JSON 序列化、`localStorage`、坏档备份与迁移 |
+| 存档 | `save.js`、`src/tools/save-transfer.js` | JSON 序列化、v1→v2 迁移、永久原档与跨域转移 |
 | 展现层 | `src/render/`、`src/ui/` | Canvas 地图和 DOM 面板，不复制模拟公式 |
 | 浏览器装配 | `src/main.js` | 输入、计时器、自动保存、事件订阅和留言请求 |
 | 可选后端 | `workers/messages-worker.js` | 留言 CRUD、管理员回复、D1 访问 |
@@ -171,7 +173,7 @@ flowchart LR
 - 当前事实只保留一个来源，避免多个文档互相冲突
 - 每轮控制在 3～4 项，超出范围的内容留到下一轮
 - 修复完成后增加回归测试，避免同一个错误被下一次 Agent 重新引入
-- 公开镜像只保留对外代码、测试和 README，不公开内部协作记录
+- 公开镜像同步代码、测试和可复现项目文档；正式站点仍由部署白名单排除 `docs/`、`AGENTS.md` 与 Git 历史
 
 ## 关键 Prompt
 
@@ -345,6 +347,7 @@ Root directory: /
 ```text
 index.html
 admin.html
+save-transfer.html
 style.css
 src/
 assets/
@@ -477,12 +480,15 @@ curl -X POST https://web1800.top/api/messages \
 web1800/
 ├─ index.html / style.css       浏览器入口与界面样式
 ├─ admin.html                   留言管理页
+├─ save-transfer.html           存档下载、恢复与跨域转移工具
 ├─ src/
-│  ├─ engine/                   DOM-free 模拟引擎
+│  ├─ engine/                   DOM-free 模拟引擎及多岛海事模块
 │  ├─ render/                   Canvas 地图渲染
 │  ├─ ui/                       DOM 面板
+│  ├─ tools/                    浏览器端存档工具
 │  └─ main.js                   浏览器装配、输入、自动保存
 ├─ tests/engine.test.mjs        Node 引擎测试
+├─ docs/idea-to-project/        架构、需求、决策和验证记录
 ├─ tools/deploy.sh              Cloudflare Pages 发布目录组装
 ├─ workers/messages-worker.js   留言板 Worker + D1 API
 └─ assets/                      图像和静态资源

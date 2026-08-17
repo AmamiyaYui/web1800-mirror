@@ -6,9 +6,23 @@
   const st = root.Engine.state;
 
   const GROUP_ORDER = ['住宅', '居住', '生产', '服务', '基础设施'];
-  const TIER_ORDER = ['farmers', 'workers', 'artisans'];
+  // [M-03 子点3] 5 阶全部渲染;解锁条件=上一阶层人口 ≥ unlockAt(tiers.js 语义);
+  // engineers/investors unlockAt=999999 → 「暂未开放」
+  const TIER_ORDER = ['farmers', 'workers', 'artisans', 'engineers', 'investors'];
+  const UNLOCKED_SOON = 999999; // 与 tiers.js 的「暂不开放」哨兵值一致
   let activeTier = 'farmers';
   let activeType = null; // [H-06] 当前放置中的建筑(按钮高亮)
+
+  // [M-03 子点3] 锁定 tab 的解锁阈值文案:上一阶层人口达标即解锁
+  function lockReqText(tid, state) {
+    const idx = TIER_ORDER.indexOf(tid);
+    const prev = idx > 0 ? TIER_ORDER[idx - 1] : null;
+    const t = TIERS[tid];
+    if (!prev || !t) return '';
+    if (t.unlockAt >= UNLOCKED_SOON) return '暂未开放';
+    const cur = Math.floor((state.population[prev] || {}).count || 0);
+    return '需' + TIERS[prev].name + ' ' + t.unlockAt + ' (当前 ' + cur + ')';
+  }
 
   function render(tabsEl, contentEl, state, onSelect) {
     // ---- 一级标签:阶级 ----
@@ -18,8 +32,12 @@
       if (!t) continue;
       const unlocked = !!state.unlocks[tid];
       const cls = 'bb-tab' + (tid === activeTier ? ' active' : '') + (unlocked ? '' : ' locked');
-      tabsHtml += '<button class="' + cls + '" data-tier="' + tid + '"' + (unlocked ? '' : ' disabled') + '>' +
-        t.name + (unlocked ? '' : ' 🔒') + '</button>';
+      const reqTxt = unlocked ? '' : lockReqText(tid, state);
+      tabsHtml += '<button class="' + cls + '" data-tier="' + tid + '"' + (unlocked ? '' : ' disabled') +
+        (reqTxt ? ' title="🔒 ' + reqTxt + '"' : '') + '>' +
+        '<span class="bb-tab-main">' + t.name + (unlocked ? '' : ' 🔒') + '</span>' +
+        (reqTxt ? '<span class="bb-lock-req">' + reqTxt.split(' (')[0] + '</span>' : '') +
+        '</button>';
     }
     tabsEl.innerHTML = tabsHtml;
 
@@ -46,17 +64,31 @@
           const costEntries = Object.entries(def.cost || {});
           const iconOf = { coin: '💰', wood: '🪵', brick: '🧱', steel: '⚙️', windows: '🪟', concrete: '🏗️' };
           const costText = costEntries.map(([g, q]) => (iconOf[g] || g) + q).join(' ');
+          // [B-45] 悬停信息:造价 + 维护 + 周期/产出速率(服务建筑=半径),快速预览
+          let infoTitle = def.name + ' · ' + (costText || '免费');
+          if (def.maintenance) infoTitle += ' · 维护💰' + def.maintenance + '/min';
+          const p = def.production;
+          if (p) {
+            if (p.cycle) infoTitle += ' · ' + p.cycle + 's/周期';
+            // [B-52] 速率保留 1 位小数(0.67→0.7),避免长周期建筑误导为 1/min
+            const out = Object.entries(p.outputs || {}).map(([g, q]) => {
+              const r = Math.round(q / p.cycle * 60 * 10) / 10;
+              return root.Engine.goods.name(g) + '×' + r + '/min';
+            }).join(' ');
+            if (out) infoTitle += ' · 产出' + out;
+          }
+          if (def.service) infoTitle += ' · 服务半径' + def.service.radius;
           const disabled = !st.canAfford(state, def.cost);
           let costCls = 'bm-cost';
           if (disabled) {
             const missing = costEntries.filter(([g, q]) => (state.resources[g] || 0) < q)
               .map(([g, q]) => (iconOf[g] || g) + '缺' + Math.ceil(q - (state.resources[g] || 0))).join(' ');
             costCls += ' bm-missing';
-            html += '<button class="build-btn disabled" data-type="' + def.id + '" disabled title="' + def.name + ' · 缺少 ' + missing + '">' +
+            html += '<button class="build-btn disabled" data-type="' + def.id + '" disabled title="' + infoTitle + '\n⚠️ 缺少 ' + missing + '">' +
               def.name + '<span class="' + costCls + '">' + missing + '</span></button>';
             continue;
           }
-          html += '<button class="build-btn' + (activeType === def.id ? ' active' : '') + '" data-type="' + def.id + '" title="' + def.name + ' · ' + costText + '">' +
+          html += '<button class="build-btn' + (activeType === def.id ? ' active' : '') + '" data-type="' + def.id + '" title="' + infoTitle + '">' +
             def.name + '<span class="' + costCls + '">' + costText + '</span></button>';
         }
         html += '</div>';

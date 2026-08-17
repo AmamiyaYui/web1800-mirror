@@ -27,19 +27,30 @@
     const ctx = canvas.getContext('2d');
     let tile = 30;          // 动态瓦片尺寸(随窗口等比缩放 × 滚轮缩放因子)
     let cam = { x: 0, y: 0 }; // [V1.5] 相机偏移(世界像素 → 屏幕: sx = wx - cam)
-    let zoom = 1;           // [V1.10 修订⑤ 顺序18] 滚轮缩放因子(0.5-4)
-    const MIN_ZOOM = 0.5, MAX_ZOOM = 4;
+    let zoom = 1;           // [V1.10 修订⑤ 顺序18] 滚轮缩放因子
+    // [B-67] 缩放下限动态(地图贴满视口短边,见 zoomAt);上限 4 倍
+    const MAX_ZOOM = 4;
+    let miniCache = null;   // [B-67] 全图级别离屏缩略缓存(布局版本变化才重建,每帧 drawImage)
+    let miniVer = -1;
+    let miniIsland = null;  // [紧急修复] 缓存所属岛(切岛后必须重建,否则旧岛缩略图叠在新岛渲染上)
+    let coverRects = null;  // [修复] 服务覆盖矩形缓存(格坐标;radius 键+布局版本变化才重建,每帧只 fillRect)
+    let coverKey = '';
+    // [根治] 分层渲染:静态层(背景+地形+道路+建筑)离屏缓存,预览拖动/悬停时每帧只画动态层(预览/覆盖/hover)
+    // 静态层在相机/布局/状态变化时重建(tick 后一次),拖动中不复用重绘 → 大档放大级别拖动流畅
+    let staticLayer = null;
+    let staticDirty = true;
+    let lastLayoutVer = null;
+    function markStaticDirty() { staticDirty = true; }
     let hover = null;
     let preview = null; // { type, x, y, ok } [V1.1] 放置预览
     let radius = null;  // { x, y, r } [V1.1] 服务范围
-    let floaters = [];  // [V1.2] 产出飘字
 
-    // 瓦片尺寸:地图较小时放大填充视口(fitted),但下限 32px——
-    // 地图超过视口时保持 32px 溢出,平移视野生效(为后续大地图铺垫)
+    // 瓦片尺寸:地图较小时放大填充视口(fitted);[B-67] 不再钳制 32px 下限——
+    // 160 地图可缩到全图可见(视口适配),海岸线/岛屿整体一览,铺海岸建筑无需盲平移
     function computeTile(vw, vh) {
       const size = getState().map.size;
       const fitted = Math.floor((Math.min(vw, vh) - 24) / size);
-      return Math.max(32, Math.min(64, fitted));
+      return Math.max(1, Math.min(64, fitted));
     }
 
     // [V1.5] 相机边界钳制:地图小于视口 → 居中;大于视口 → 限制在 [0, 地图-视口]
@@ -50,6 +61,85 @@
       else cam.x = Math.max(0, Math.min(mw - vw, cam.x));
       if (mh <= vh) cam.y = (mh - vh) / 2;
       else cam.y = Math.max(0, Math.min(mh - vh, cam.y));
+    }
+
+    // [根治] 静态层重建:背景+地形+道路+建筑绘制到离屏 canvas(世界坐标),draw 时按相机 drawImage
+    // 相机/布局(_layoutVer)/状态(redraw→markStaticDirty)变化才重建;预览拖动中复用 → 每帧只画动态层
+    function rebuildStaticLayer(s, size, vw, vh) {
+      if (!staticLayer) staticLayer = document.createElement('canvas');
+      if (staticLayer.width !== vw) staticLayer.width = vw;
+      if (staticLayer.height !== vh) staticLayer.height = vh;
+      const sc = staticLayer.getContext('2d');
+      sc.clearRect(0, 0, vw, vh);
+      sc.fillStyle = '#14213d';
+      sc.fillRect(0, 0, vw, vh);
+      sc.save();
+      sc.translate(-cam.x, -cam.y);
+      const simple = false; // [根治] 静态层恒非 simple(名称绘制不受缩放级别限制)
+      const x0 = Math.max(0, Math.floor(cam.x / tile));
+      const y0 = Math.max(0, Math.floor(cam.y / tile));
+      const x1 = Math.min(size - 1, Math.ceil((cam.x + vw) / tile));
+      const y1 = Math.min(size - 1, Math.ceil((cam.y + vh) / tile));
+        // 地形(世界坐标,仅可见范围)[性能 B:网格线仅放大时画,减少一半绘制调用]
+        const drawGrid = zoom >= 1.5;
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const t = s.map.terrain[y][x];
+            sc.fillStyle = TERRAIN_COLORS[t] || '#ccc';
+            sc.fillRect(x * tile, y * tile, tile, tile);
+            if (drawGrid) {
+              sc.strokeStyle = 'rgba(0,0,0,0.08)';
+              sc.strokeRect(x * tile + 0.5, y * tile + 0.5, tile, tile);
+            }
+          }
+        }
+        // 道路(仅可见范围)
+        const roadIn = tile * 0.2, roadSz = tile * 0.6;
+        for (const k of Object.keys(s.roads)) {
+          const [x, y] = k.split(',').map(Number);
+          if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+          // [V1.10 修订⑤ 顺序3/13] 道路等级:土路土黄 / 石板路浅灰(服务传播 1.5 倍,土路升级而来)
+          sc.fillStyle = s.roads[k] === 2 ? '#c9c9c9' : '#b5895a';
+          sc.fillRect(x * tile + roadIn, y * tile + roadIn, roadSz, roadSz);
+        }
+        // 建筑(仅可见范围)[V1.8 修订②:多格 footprint]
+        const nameFont = Math.max(10, Math.round(tile * 0.45));
+        for (const b of Object.values(s.buildings)) {
+          if (b.x > x1 || b.y > y1) continue;
+          const def = Engine.buildings.getDef(b.type);
+          if (!def) continue;
+          // [V1.10 修订⑤ 顺序11] 建筑朝向:绕锚点旋转,绘制用旋转后包围盒(锚点可能不在左上角)
+          const rs = Engine.placement.footprintBounds(def, b.x, b.y, b.rot);
+          const w = rs.w, h = rs.h;
+          if (rs.x + w - 1 < x0 || rs.y + h - 1 < y0) continue;
+          const px = rs.x * tile, py = rs.y * tile;
+          const pw = w * tile, ph = h * tile;
+          const colorKey = def.special === 'warehouse' ? 'warehouse'
+            : (def.category === '住宅' ? 'residence' : (def.category === '服务' ? 'service' : 'production'));
+          sc.fillStyle = BUILDING_COLORS[colorKey];
+          sc.fillRect(px + 1, py + 1, pw - 2, ph - 2);
+          sc.strokeStyle = 'rgba(0,0,0,0.35)';
+          sc.strokeRect(px + 1.5, py + 1.5, pw - 3, ph - 3);
+          if (simple) continue;
+          sc.fillStyle = '#fff';
+          // [玩家反馈] 显示全名:字号按建筑宽度自适应(放不下时最小 9px,仍溢出则截断)
+          const nameFont2 = Math.min((pw - 4) / def.name.length, nameFont);
+          sc.font = 'bold ' + Math.max(9, Math.round(nameFont2)) + 'px sans-serif';
+          sc.textAlign = 'center';
+          sc.textBaseline = 'middle';
+          sc.fillText(def.name, px + pw / 2, py + ph / 2);
+          if (b.status === 'disconnected') {
+            sc.fillStyle = '#d32f2f';
+            sc.font = 'bold ' + (nameFont + 3) + 'px sans-serif';
+            sc.fillText('⚠', px + pw - tile * 0.15, py + tile * 0.35);
+          } else if (b.status === 'waiting') {
+            sc.fillStyle = '#f57f17';
+            sc.font = 'bold ' + nameFont + 'px sans-serif';
+            sc.fillText('!', px + pw - tile * 0.15, py + tile * 0.35);
+          }
+        }
+
+      sc.restore();
     }
 
     function draw() {
@@ -63,6 +153,12 @@
       if (canvas.height !== vh) canvas.height = vh;
       tile = computeTile(vw, vh) * zoom;
       clampCamera(vw, vh);
+      // [修复] 动态层(preview 名称字号)的 nameFont——rebuildStaticLayer 内有同名局部变量,作用域独立
+      const nameFont = Math.max(10, Math.round(tile * 0.45));
+      // [紧急修复] canvas 不自动擦除:显式清画布 + 深水背景(相机移动/缩小后旧帧残影必须清除)
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#14213d';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
       ctx.translate(-cam.x, -cam.y);
@@ -73,62 +169,43 @@
       const x1 = Math.min(size - 1, Math.ceil((cam.x + vw) / tile));
       const y1 = Math.min(size - 1, Math.ceil((cam.y + vh) / tile));
 
-      // 地形(世界坐标,仅可见范围)[性能 B:网格线仅放大时画,减少一半绘制调用]
-      const drawGrid = zoom >= 1.5;
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          const t = s.map.terrain[y][x];
-          ctx.fillStyle = TERRAIN_COLORS[t] || '#ccc';
-          ctx.fillRect(x * tile, y * tile, tile, tile);
-          if (drawGrid) {
-            ctx.strokeStyle = 'rgba(0,0,0,0.08)';
-            ctx.strokeRect(x * tile + 0.5, y * tile + 0.5, tile, tile);
+      // [B-67] 简化绘制:全图缩小级别(tile<12px)走离屏缩略缓存(布局版本变化才重建,每帧 drawImage)
+      const simple = tile < 12;
+      if (simple) {
+        if (!miniCache || miniIsland !== s.activeIslandId || miniVer !== (s._layoutVer || 0)) {
+          if (!miniCache) { miniCache = document.createElement('canvas'); miniCache.width = size; miniCache.height = size; }
+          const mc = miniCache.getContext('2d');
+          mc.clearRect(0, 0, size, size);
+          for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+            mc.fillStyle = TERRAIN_COLORS[s.map.terrain[y][x]] || '#ccc';
+            mc.fillRect(x, y, 1, 1);
           }
+          for (const k of Object.keys(s.roads)) {
+            const [x, y] = k.split(',').map(Number);
+            mc.fillStyle = s.roads[k] === 2 ? '#c9c9c9' : '#b5895a';
+            mc.fillRect(x, y, 1, 1);
+          }
+          for (const b of Object.values(s.buildings)) {
+            const def = Engine.buildings.getDef(b.type);
+            if (!def) continue;
+            const rs = Engine.placement.footprintBounds(def, b.x, b.y, b.rot);
+            const colorKey = def.special === 'warehouse' ? 'warehouse'
+              : (def.category === '住宅' ? 'residence' : (def.category === '服务' ? 'service' : 'production'));
+            mc.fillStyle = BUILDING_COLORS[colorKey];
+            mc.fillRect(rs.x, rs.y, rs.w, rs.h);
+          }
+          miniIsland = s.activeIslandId;
+          miniVer = s._layoutVer || 0;
         }
-      }
-      // 道路(仅可见范围)
-      const roadIn = tile * 0.2, roadSz = tile * 0.6;
-      for (const k of Object.keys(s.roads)) {
-        const [x, y] = k.split(',').map(Number);
-        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
-        // [V1.10 修订⑤ 顺序3/13] 道路等级:土路土黄 / 石板路浅灰(服务传播 1.5 倍,土路升级而来)
-        ctx.fillStyle = s.roads[k] === 2 ? '#c9c9c9' : '#b5895a';
-        ctx.fillRect(x * tile + roadIn, y * tile + roadIn, roadSz, roadSz);
-      }
-      // 建筑(仅可见范围)[V1.8 修订②:多格 footprint]
-      const nameFont = Math.max(10, Math.round(tile * 0.45));
-      for (const b of Object.values(s.buildings)) {
-        if (b.x > x1 || b.y > y1) continue;
-        const def = Engine.buildings.getDef(b.type);
-        if (!def) continue;
-        // [V1.10 修订⑤ 顺序11] 建筑朝向:绕锚点旋转,绘制用旋转后包围盒(锚点可能不在左上角)
-        const rs = Engine.placement.footprintBounds(def, b.x, b.y, b.rot);
-        const w = rs.w, h = rs.h;
-        if (rs.x + w - 1 < x0 || rs.y + h - 1 < y0) continue;
-        const px = rs.x * tile, py = rs.y * tile;
-        const pw = w * tile, ph = h * tile;
-        const colorKey = def.special === 'warehouse' ? 'warehouse'
-          : (def.category === '住宅' ? 'residence' : (def.category === '服务' ? 'service' : 'production'));
-        ctx.fillStyle = BUILDING_COLORS[colorKey];
-        ctx.fillRect(px + 1, py + 1, pw - 2, ph - 2);
-        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-        ctx.strokeRect(px + 1.5, py + 1.5, pw - 3, ph - 3);
-        ctx.fillStyle = '#fff';
-        // [玩家反馈] 显示全名:字号按建筑宽度自适应(放不下时最小 9px,仍溢出则截断)
-        const nameFont2 = Math.min((pw - 4) / def.name.length, nameFont);
-        ctx.font = 'bold ' + Math.max(9, Math.round(nameFont2)) + 'px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(def.name, px + pw / 2, py + ph / 2);
-        if (b.status === 'disconnected') {
-          ctx.fillStyle = '#d32f2f';
-          ctx.font = 'bold ' + (nameFont + 3) + 'px sans-serif';
-          ctx.fillText('⚠', px + pw - tile * 0.15, py + tile * 0.35);
-        } else if (b.status === 'waiting') {
-          ctx.fillStyle = '#f57f17';
-          ctx.font = 'bold ' + nameFont + 'px sans-serif';
-          ctx.fillText('!', px + pw - tile * 0.15, py + tile * 0.35);
+        ctx.drawImage(miniCache, 0, 0, size, size, 0, 0, size * tile, size * tile);
+      } else {
+        // [根治] 静态层:背景+地形+道路+建筑离屏缓存(相机/布局/状态变化才重建;预览拖动中每帧只 drawImage)
+        if (staticDirty || !staticLayer || staticLayer.width !== vw || staticLayer.height !== vh || lastLayoutVer !== (s._layoutVer || 0)) {
+          rebuildStaticLayer(s, size, vw, vh);
+          lastLayoutVer = s._layoutVer || 0;
+          staticDirty = false;
         }
+        ctx.drawImage(staticLayer, 0, 0, vw, vh, cam.x, cam.y, vw, vh); // [根治] 屏幕坐标缓存 → 世界坐标绘制(translate 下)
       }
       // [V1.10 修订] 服务范围 = 路距离:沿道路延伸覆盖(原版机制),悬停/预览服务建筑时显示
       // [用户要求] 开发度范围可视化:农田/牧场/伐木类(production.radius)显示未开发范围圆 + 开发度%
@@ -151,11 +228,34 @@
           }
         } else {
           const covered = root.Engine.population.serviceRoads(getState(), radius.type);
-          ctx.fillStyle = 'rgba(92,107,192,0.25)';
-          for (const k of covered) {
-            const [rx, ry] = k.split(',').map(Number);
-            ctx.fillRect(rx * tile, ry * tile, tile, tile);
+          // [修复] 覆盖矩形缓存:Set→rects(格坐标,行合并)只在 radius 键+布局版本变化时重建;
+          // 每帧只 fillRect(缩放/平移不重建,tile 换算在绘制时);键含岛标识与 radius.r(切岛/半径变化必须失效)
+          const key = s.activeIslandId + '|' + radius.type + ':' + radius.x + ',' + radius.y + ':' + (radius.r || 0) + ':' + (s._layoutVer || 0);
+          if (coverRects === null || coverKey !== key) {
+            coverKey = key;
+            const rows = new Map();
+            for (const k of covered) {
+              const c = k.indexOf(',');
+              const rx = Number(k.slice(0, c)), ry = Number(k.slice(c + 1));
+              let xs = rows.get(ry);
+              if (!xs) { xs = []; rows.set(ry, xs); }
+              xs.push(rx);
+            }
+            const rects = [];
+            for (const [ry, xs] of rows) {
+              xs.sort((a, b) => a - b);
+              let s2 = xs[0], prev = xs[0];
+              for (let i = 1; i <= xs.length; i++) {
+                const x = xs[i];
+                if (x === prev + 1) { prev = x; continue; }
+                rects.push([s2, ry, prev - s2 + 1]);
+                if (i < xs.length) { s2 = x; prev = x; }
+              }
+            }
+            coverRects = rects;
           }
+          ctx.fillStyle = 'rgba(92,107,192,0.25)';
+          for (const [rx, ry, w] of coverRects) ctx.fillRect(rx * tile, ry * tile, w * tile, tile);
           ctx.strokeStyle = 'rgba(92,107,192,0.8)';
           ctx.setLineDash([6, 4]);
           ctx.beginPath();
@@ -203,20 +303,6 @@
         ctx.strokeRect(hover.x * tile + 1, hover.y * tile + 1, tile - 2, tile - 2);
         ctx.lineWidth = 1;
       }
-      // [V1.2] 产出飘字(1.2s 上升淡出,世界坐标)
-      const now = performance.now();
-      floaters = floaters.filter((f) => now - f.born < 1200);
-      for (const f of floaters) {
-        const age = (now - f.born) / 1200;
-        ctx.globalAlpha = Math.max(0, 1 - age);
-        ctx.fillStyle = f.color;
-        ctx.font = 'bold ' + nameFont + 'px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(f.text, (f.x + 0.5) * tile, (f.y + 0.3) * tile - age * tile * 0.8);
-        ctx.globalAlpha = 1;
-      }
-
       ctx.restore();
 
       // [V1.6] 昼夜明暗(屏幕空间遮罩):7-17 白天,18-21 黄昏渐暗,22-4 深夜,5-6 清晨渐亮
@@ -245,16 +331,21 @@
     function setCamera(x, y) {
       cam.x = x;
       cam.y = y;
+      markStaticDirty(); // [根治] 相机移动 → 静态层重建
       clampCamera(canvas.width, canvas.height);
     }
 
     // [V1.10 修订⑧] 首屏定位到最接近岛屿平地重心的可建格，而不是地图左上角海面。
+    // [B-67] 初始视野 = 全图贴边(地图充满视口短边,无留白;不再缩到比地图小)
     function focusInitialArea() {
       const s = getState();
       const parent = canvas.parentElement;
       const vw = parent ? parent.clientWidth : window.innerWidth;
       const vh = parent ? parent.clientHeight : window.innerHeight;
-      tile = computeTile(vw, vh) * zoom;
+      const base = computeTile(vw, vh);
+      zoom = Math.max(0.1, (Math.min(vw, vh) - 24) / (s.map.size * base));
+      tile = base * zoom;
+      markStaticDirty(); // [根治] 初始定位 → 静态层重建
 
       let sumX = 0, sumY = 0, count = 0;
       for (let y = 0; y < s.map.size; y++) {
@@ -289,12 +380,17 @@
     }
 
     // [V1.10 修订⑤ 顺序18] 滚轮缩放:以鼠标位置为焦点(鼠标下的格保持不动)
+    // [B-67] 最小缩放 = 地图恰好充满视口短边(贴边),不再缩到比地图小留白
     function zoomAt(factor, clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
       const before = tileAt(clientX, clientY);
-      zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * factor));
       const vw = canvas.width, vh = canvas.height;
-      const nt = computeTile(vw, vh) * zoom;
+      const size = getState().map.size;
+      const base = computeTile(vw, vh);
+      const minZoom = Math.max(0.1, (Math.min(vw, vh) - 24) / (size * base));
+      zoom = Math.min(MAX_ZOOM, Math.max(minZoom, zoom * factor));
+      markStaticDirty(); // [根治] 缩放 → 静态层重建
+      const nt = base * zoom;
       cam.x = before.x * nt + nt / 2 - (clientX - rect.left);
       cam.y = before.y * nt + nt / 2 - (clientY - rect.top);
       clampCamera(vw, vh);
@@ -305,12 +401,8 @@
     function setPreview(p) { preview = p; }
     function getPreview() { return preview; } // [V1.10 修订⑤ 顺序11] R 键旋转时刷新预览
     function setRadius(r) { radius = r; }
-    function addFloater(x, y, text, color) { // [V1.2]
-      floaters.push({ x, y, text, color: color || '#ffd54f', born: performance.now() });
-      if (floaters.length > 30) floaters.shift();
-    }
 
-    return { draw, tileAt, setHover, setPreview, getPreview, setRadius, addFloater, setCamera, getCamera, focusInitialArea, zoomAt, getZoom: () => zoom, getTile: () => tile };
+    return { draw, tileAt, setHover, setPreview, getPreview, setRadius, setCamera, getCamera, focusInitialArea, zoomAt, getZoom: () => zoom, getTile: () => tile, getTileSize: () => tile, markStaticDirty }; // [根治] markStaticDirty:状态变化后静态层重建
   }
 
   root.Render = root.Render || {};

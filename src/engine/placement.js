@@ -126,7 +126,8 @@
     return null;
   }
 
-  function canPlace(state, type, x, y, rot, ignoreId) {
+  // [B-51] skipCost:移动建筑免费,跳过资源检查(placeBuilding 仍检查)
+  function canPlace(state, type, x, y, rot, ignoreId, skipCost) {
     const def = getDef(type);
     if (!def) return { ok: false, reason: '未知建筑' };
     const cells = footprint(def, x, y, rot);
@@ -138,7 +139,13 @@
     }
     const tErr = terrainOkAll(state, def, cells);
     if (tErr) return { ok: false, reason: tErr };
-    if (!st.canAfford(state, def.cost)) return { ok: false, reason: '资金不足' };
+    // [B-63] 码头每岛最多 1 座(REQ-38/MI-10)
+    if (type === 'port') {
+      for (const b of Object.values(state.buildings || {})) {
+        if (b.type === 'port' && b.id !== ignoreId) return { ok: false, reason: '每岛最多 1 座码头' };
+      }
+    }
+    if (!skipCost && !st.canAfford(state, def.cost)) return { ok: false, reason: '资金不足' };
     return { ok: true };
   }
 
@@ -157,6 +164,9 @@
       state.grid[st.key(c.x, c.y)] = b.id;
     }
     root.Engine.connectivity.markDirty(state);
+    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)
+    const actIsl = state.islands ? state.islands[state.activeIslandId] : state; // [优化] 岛级布局版本(serviceRoads 缓存失效;兼容 world/岛两种调用)
+    if (actIsl) actIsl._layoutVer = (actIsl._layoutVer || 0) + 1; // [优化] 岛级布局版本递增
     economy.refresh(state, { produce: false, logs: true });
     st.addLog(state, '建造:' + def.name + ' (' + x + ',' + y + ')');
     return { ok: true, building: b };
@@ -182,6 +192,9 @@
     }
     st.removeBuildingRaw(state, id);
     root.Engine.connectivity.markDirty(state);
+    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)
+    const actIsl = state.islands ? state.islands[state.activeIslandId] : state; // [优化] 岛级布局版本(serviceRoads 缓存失效;兼容 world/岛两种调用)
+    if (actIsl) actIsl._layoutVer = (actIsl._layoutVer || 0) + 1; // [优化] 岛级布局版本递增
     economy.refresh(state, { produce: false, logs: true });
     st.addLog(state, '拆除:' + def.name + (refunds.length ? ' (返还 ' + refunds.join(' ') + ')' : ''));
     return { ok: true };
@@ -196,7 +209,7 @@
     if (!def) return { ok: false, reason: '未知建筑' };
     const nrot = ((rot || 0) % 4 + 4) % 4;
     if (nx === b.x && ny === b.y && nrot === b.rot) return { ok: false, reason: '位置未变化' };
-    const check = canPlace(state, b.type, nx, ny, nrot, id);
+    const check = canPlace(state, b.type, nx, ny, nrot, id, true); // [B-51] 移动免费:跳过资源检查
     if (!check.ok) return check;
     // 释放旧占用 → 更新坐标 → 写入新占用
     for (const c of footprint(def, b.x, b.y, b.rot)) {
@@ -205,6 +218,9 @@
     b.x = nx; b.y = ny; b.rot = nrot;
     for (const c of footprint(def, nx, ny, nrot)) state.grid[st.key(c.x, c.y)] = b.id;
     root.Engine.connectivity.markDirty(state);
+    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)
+    const actIsl = state.islands ? state.islands[state.activeIslandId] : state; // [优化] 岛级布局版本(serviceRoads 缓存失效;兼容 world/岛两种调用)
+    if (actIsl) actIsl._layoutVer = (actIsl._layoutVer || 0) + 1; // [优化] 岛级布局版本递增
     economy.refresh(state, { produce: false, logs: false });
     st.addLog(state, '🚚 ' + def.name + ' 移动到 (' + nx + ',' + ny + ')');
     return { ok: true, building: b };
@@ -224,6 +240,9 @@
     if (on && !canPlaceRoad(state, x, y)) return { ok: false, reason: '此处不能铺路' };
     st.setRoad(state, x, y, on, level);
     root.Engine.connectivity.markDirty(state);
+    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)
+    const actIsl = state.islands ? state.islands[state.activeIslandId] : state; // [优化] 岛级布局版本(serviceRoads 缓存失效;兼容 world/岛两种调用)
+    if (actIsl) actIsl._layoutVer = (actIsl._layoutVer || 0) + 1; // [优化] 岛级布局版本递增
     economy.refresh(state, { produce: false, logs: true });
     return { ok: true };
   }
@@ -273,6 +292,9 @@
       state.grid[st.key(c.x, c.y)] = nb.id; // 含锚点格(与 placeBuilding 一致)
     }
     root.Engine.connectivity.markDirty(state);
+    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)    state._layoutVer = (state._layoutVer || 0) + 1; // [B-67] 布局版本:放置/拆除/移动/铺路/升级后递增(全图缩略缓存失效)
+    const actIsl = state.islands ? state.islands[state.activeIslandId] : state; // [优化] 岛级布局版本(serviceRoads 缓存失效;兼容 world/岛两种调用)
+    if (actIsl) actIsl._layoutVer = (actIsl._layoutVer || 0) + 1; // [优化] 岛级布局版本递增
     st.addLog(state, '🏘️ ' + def.name + ' 升级为 ' + newDef.name);
     return { ok: true, building: nb };
   }

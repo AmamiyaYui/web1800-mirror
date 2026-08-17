@@ -4,7 +4,33 @@
   const E = root.Engine;
 
   // ---- 状态初始化:读档优先 ----
-  let state = E.save.load();
+  let state;
+  try {
+    state = E.save.load();
+  } catch (error) {
+    if (!error || error.code !== 'MIGRATION_BLOCKED') throw error;
+    document.body.setAttribute('data-save-migration-blocked', 'true');
+    const blocker = document.createElement('div');
+    blocker.id = 'save-migration-blocked';
+    blocker.setAttribute('role', 'alert');
+    blocker.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#14181f;color:#d7dde5;display:grid;place-items:center;padding:24px;font-family:Microsoft YaHei,sans-serif';
+    const panel = document.createElement('div');
+    panel.style.cssText = 'max-width:620px;background:#1d232d;border:1px solid #e06c5f;border-radius:12px;padding:24px;line-height:1.7';
+    const title = document.createElement('h1');
+    title.style.cssText = 'margin:0 0 10px;color:#e0a458;font-size:22px';
+    title.textContent = '存档迁移已安全中止';
+    const detail = document.createElement('p');
+    detail.textContent = error.message + '。原始主存档没有被覆盖，请先释放浏览器存储空间，再重新打开游戏。';
+    const link = document.createElement('a');
+    link.href = 'save-transfer.html';
+    link.style.cssText = 'color:#e0a458';
+    link.textContent = '打开存档迁移工具';
+    panel.append(title, detail, link);
+    blocker.appendChild(panel);
+    document.body.appendChild(blocker);
+    root.__game = { state: null, saveMigrationBlocked: true, error: error.message };
+    return;
+  }
   if (state) {
     E.state.addLog(state, '📂 读取存档成功');
   } else {
@@ -25,6 +51,9 @@
   // ---- 渲染器 ----
   const canvas = document.getElementById('map');
   const renderer = root.Render.mapRenderer.createRenderer(canvas, () => state);
+  // [紧急修复] 脏标记:暂停/静止时跳过每帧全量重绘(4214 人口大档卡顿);飘字动画期间强制重绘
+  let renderDirty = true;
+  function markDirty() { renderDirty = true; }
   renderer.focusInitialArea();
 
   // ---- DOM ----
@@ -62,7 +91,8 @@
 
   function redraw() {
     updateSpeedUI();
-    renderer.draw();
+    markDirty(); // [紧急修复] 统一由 rAF frame 执行重绘(暂停静止时不再每帧全量重绘)
+    if (renderer.markStaticDirty) renderer.markStaticDirty(); // [根治] tick/交互状态变化 → 静态层重建
     root.UI.economy.renderRes(resEl, state);
     root.UI.economy.renderNeeds(needEl, state);
     root.UI.economy.renderPop(popEl, state);
@@ -94,6 +124,22 @@
           if (!r.ok) root.UI.panels.toast(infoEl, r.reason);
           else { root.UI.panels.toast(infoEl, '住宅升级成功'); redraw(); }
         });
+        // [B-63] 造船厂订单按钮:下单/取消(事件绑定在 redraw 后,按钮随详情刷新)
+        const orderBtn = infoEl.querySelector('#btn-ship-order');
+        if (orderBtn) {
+          orderBtn.onclick = () => {
+            const r = E.ships.submitShipOrder(state, orderBtn.getAttribute('data-shipyard'));
+            root.UI.panels.toast(infoEl, r.ok ? '🚢 下单成功(180 tick 建造)' : r.reason);
+            redraw();
+          };
+        }
+        infoEl.querySelectorAll('[data-cancel-order]').forEach((btn) => {
+          btn.onclick = () => {
+            E.ships.cancelShipOrder(state, btn.getAttribute('data-cancel-order'));
+            root.UI.panels.toast(infoEl, '订单已取消,费用全额返还');
+            redraw();
+          };
+        });
       } else {
         infoEl.innerHTML = '<div class="panel-title">信息</div><div>(已拆除)</div>';
         selectedBuildingId = null;
@@ -112,7 +158,7 @@
     const c = renderer.getCamera();
     renderer.setCamera((bb.x + bb.w / 2 + 0.5) * renderer.getTile() - window.innerWidth / 2, (bb.y + bb.h / 2 + 0.5) * renderer.getTile() - window.innerHeight / 2);
     renderer.setHover({ x: b.x, y: b.y });
-    renderer.draw();
+    markDirty();
     // 打开详情(复用点击分支逻辑)
     selectedBuildingId = buildingId; // [H-05] 定位即选中,redraw 持续刷新
     setSideTab('right', 'info'); // [UI改造 A2+B2] 定位异常建筑 → 切到详情 tab
@@ -125,17 +171,25 @@
     setTimeout(() => renderer.setHover(null), 1200); // 闪烁效果:1.2s 后取消高亮
   }
 
-  // ---- 游戏循环 ----
-  let timer = null;
+  // ---- 游戏循环 [Sol 轮2/AC-17] rAF 跨帧分片调度 ----
+  // 每浏览器帧推进一片(逐岛分帧);分片未完成不启动下一世界 tick;complete=true 才计数/自动保存
+  let rafId = null;
   let ticks = 0;
-  function startTimer() {
-    clearInterval(timer);
-    if (state.settings.paused) return;
-    timer = setInterval(() => {
-      E.tick.tick(state);
-      ticks++;
+  let scheduler = null;
+  function pump(ts) {
+    rafId = requestAnimationFrame(pump);
+    if (!scheduler) return;
+    const r = scheduler.frame(ts);
+    if (r.complete && r.started) {
+      ticks = r.ticks;
       if (ticks % 30 === 0) E.save.save(state);
-    }, 1000 / state.settings.speed);
+    }
+  }
+  function startTimer() {
+    cancelAnimationFrame(rafId);
+    ticks = 0;
+    scheduler = E.tick.createScheduler(state);
+    rafId = requestAnimationFrame(pump);
   }
 
   // ---- 输入 [V1.1] 拖拽铺路/拆除 + 放置预览 + 服务范围 ----
@@ -183,7 +237,11 @@
     }
     if (mode === 'demolish') {
       const id = state.grid[k];
-      if (id) E.placement.demolish(state, id);
+      if (id) {
+        // [B-63] 拆除造船厂:自动取消其未完工订单(全额返还,REQ-39)
+        if (state.buildings[id] && state.buildings[id].type === 'sailingShipyard') E.ships.cancelShipyardOrders(state, state.activeIslandId, id);
+        E.placement.demolish(state, id);
+      }
       else if (state.roads[k]) E.placement.setRoad(state, t.x, t.y, false);
       return true;
     }
@@ -216,7 +274,11 @@
       mode = 'move:' + selId;
       renderer.setPreview(null);
       renderer.setRadius(null);
+      selectedBuildingId = null; // [B-47] 移动阶段清除选中,避免 redraw 用旧选中覆盖移动信息卡
+      selectedRadius = null;
       const mdef = E.buildings.getDef(state.buildings[selId].type);
+      // [B-45] 移动阶段:详情面板显示被移动建筑的信息卡(自动切详情 tab)
+      if (mdef) { setSideTab('right', 'info'); root.UI.panels.showPlacementInfo(infoEl, mdef); }
       root.UI.panels.toast(infoEl, '点击目标位置放置' + (mdef && mdef.name ? '(' + mdef.name + ')' : '') + ',R 旋转,Esc 取消');
     } else if (mode.startsWith('move:')) {
       // [V1.10 修订⑤ 顺序23] 移动建筑:点击目标位置(预览绿块内按锚点,同放置)
@@ -277,6 +339,7 @@
 
   function updateHover(t) {
     renderer.setHover(t);
+    markDirty(); // [紧急修复] hover 变化需重绘(原依赖每帧无条件 draw)
     // 放置预览(幽灵框)[V1.10 修订⑤ 顺序23] 移动模式同放置预览(忽略自身占用)
     if (mode.startsWith('build:')) {
       const type = mode.slice(6);
@@ -285,12 +348,14 @@
       const mv = state.buildings[mode.slice(5)];
       if (mv) {
         const mdef = E.buildings.getDef(mv.type);
-        renderer.setPreview({ type: mv.type, x: t.x, y: t.y, rot: buildRot, ok: E.placement.canPlace(state, mv.type, t.x, t.y, buildRot, mv.id).ok });
+        renderer.setPreview({ type: mv.type, x: t.x, y: t.y, rot: buildRot, ok: E.placement.canPlace(state, mv.type, t.x, t.y, buildRot, mv.id, true).ok }); // [B-51] 移动预览不因资源不足变红
         if (mdef && mdef.service) renderer.setRadius({ x: t.x, y: t.y, r: mdef.service.radius, type: mdef.service.type });
         else if (mdef && mdef.production && mdef.production.radius) {
           // [用户要求] 移动预览:开发度范围圆(跟随新位置)
-          const ph = { x: t.x, y: t.y };
-          renderer.setRadius({ x: t.x, y: t.y, r: mdef.production.radius, type: 'dev', dev: E.economy.developmentRatio(state, ph, mdef) });
+          // [B-56] 预览把自身 footprint 计入占用(与放置后一致,避免预览 100%/放置后打折)
+          const ph = { x: t.x, y: t.y, rot: buildRot };
+          const phCells = E.placement.footprint(mdef, t.x, t.y, buildRot);
+          renderer.setRadius({ x: t.x, y: t.y, r: mdef.production.radius, type: 'dev', dev: E.economy.developmentRatio(state, ph, mdef, { selfCells: phCells }) });
         }
         else renderer.setRadius(null);
       } else {
@@ -314,25 +379,28 @@
       if (pdef && pdef.service) renderer.setRadius({ x: t.x, y: t.y, r: pdef.service.radius, type: pdef.service.type });
       else if (pdef && pdef.production && pdef.production.radius) {
         // [用户要求] 建造预览:开发度范围圆(未放置,按当前区域算)
-        const ph = { x: t.x, y: t.y };
-        renderer.setRadius({ x: t.x, y: t.y, r: pdef.production.radius, type: 'dev', dev: E.economy.developmentRatio(state, ph, pdef) });
+        // [B-56] 预览把自身 footprint 计入占用(与放置后一致,避免预览 100%/放置后打折)
+        const ph = { x: t.x, y: t.y, rot: buildRot };
+        const phCells = E.placement.footprint(pdef, t.x, t.y, buildRot);
+        renderer.setRadius({ x: t.x, y: t.y, r: pdef.production.radius, type: 'dev', dev: E.economy.developmentRatio(state, ph, pdef, { selfCells: phCells }) });
       }
       else renderer.setRadius(null);
     } else {
       renderer.setRadius(null);
     }
     // [用户要求] 查看常驻:鼠标移开选中建筑后仍显示其范围圆(点击空白清除)
-    if (!hovered && !hdef && selectedRadius && mode !== 'move' && !mode.startsWith('move:')) {
+    // [修复] 放置模式(build:)跳过常驻覆盖:拖出建筑时鼠标路径常经过服务建筑,旧覆盖残留致放大级别逐格绘制卡死
+    if (!hovered && !hdef && selectedRadius && mode !== 'move' && !mode.startsWith('move:') && !mode.startsWith('build:')) {
       renderer.setRadius(selectedRadius);
     }
-    renderer.draw();
+    markDirty();
   }
 
   canvas.addEventListener('wheel', (e) => {
     // [V1.10 修订⑤ 顺序18] 滚轮缩放视口(焦点缩放)
     e.preventDefault();
     renderer.zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
-    renderer.draw();
+    markDirty();
   });
   canvas.addEventListener('mousedown', (e) => {
     if (e.button === 2) { // [V1.5] 右键 → 开始平移视野
@@ -353,6 +421,7 @@
         panning.camX - (e.clientX - panning.startX),
         panning.camY - (e.clientY - panning.startY)
       );
+      markDirty(); // [紧急修复] 平移中逐帧重绘(脏标记驱动)
       return;
     }
     const t = renderer.tileAt(e.clientX, e.clientY);
@@ -361,6 +430,10 @@
       paint(t);
     }
     updateHover(t);
+  });
+  window.addEventListener('error', (ev) => {
+    // [诊断] 全局错误可见(玩家卡死时错误不再静默)
+    document.title = 'JS错误: ' + (ev.message || '') + ' @' + (ev.filename || '').split('/').pop() + ':' + (ev.lineno || '');
   });
   canvas.addEventListener('mouseup', (e) => {
     if (panning) { // [V1.5] 结束平移
@@ -386,6 +459,11 @@
       }
     }
   });
+  // [玩家反馈] 第①层页面手势做满:全页禁右键菜单/中键自动滚动/拖拽(插件与系统手势页面层无法拦截)
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); }); // 中键点击(防自动滚动)
+  canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); }); // 中键按下(防自动滚动开始)
+  document.addEventListener('dragstart', (e) => e.preventDefault()); // 防拖拽 canvas/图片/文本
   canvas.addEventListener('mouseleave', () => {
     painting = false;
     panning = null;
@@ -393,7 +471,7 @@
     renderer.setHover(null);
     renderer.setPreview(null);
     renderer.setRadius(null);
-    renderer.draw();
+    markDirty();
   });
 
   function selectBuilding(type) {
@@ -414,7 +492,7 @@
       const cur = renderer.getPreview && renderer.getPreview();
       const type = mode.startsWith('build:') ? mode.slice(6) : (state.buildings[mode.slice(5)] || {}).type;
       if (cur && type) {
-        renderer.setPreview({ type, x: cur.x, y: cur.y, rot: buildRot, ok: E.placement.canPlace(state, type, cur.x, cur.y, buildRot, mode.startsWith('move:') ? mode.slice(5) : undefined).ok });
+        renderer.setPreview({ type, x: cur.x, y: cur.y, rot: buildRot, ok: E.placement.canPlace(state, type, cur.x, cur.y, buildRot, mode.startsWith('move:') ? mode.slice(5) : undefined, mode.startsWith('move:')).ok }); // [B-51] 移动旋转预览跳过资源检查
       }
       redraw();
     }
@@ -428,6 +506,15 @@
     renderer.setPreview(null);
     renderer.setRadius(null);
     root.UI.buildMenu.setActiveType(m.startsWith('build:') ? m.slice(6) : null); // [H-06] 建筑按钮高亮跟随模式
+    // [B-45] 放置模式:详情面板显示该建筑完整信息卡(自动切详情 tab)
+    // [B-47] 放置模式与"查看选中"互斥:清除 selectedBuildingId,避免 redraw 每 tick 用旧选中覆盖信息卡
+    if (m.startsWith('build:')) {
+      selectedBuildingId = null;
+      selectedRadius = null;
+      renderer.setRadius(null);
+      const pd = E.buildings.getDef(m.slice(6));
+      if (pd) { setSideTab('right', 'info'); root.UI.panels.showPlacementInfo(infoEl, pd); }
+    }
     redraw(); // [H-06] 立即重渲染(菜单按钮高亮/提示条即时生效,不等下一 tick)
     // [H-06] 模式提示条:持续显示当前操作与按键说明(与实际键位一致:Esc 取消,R 旋转)
     const hintEl = document.getElementById('mode-hint');
@@ -619,8 +706,282 @@
     document.getElementById('legend-overlay').classList.add('hidden');
   };
 
+  // ---- [B-62] 切岛与世界航图(REQ-33:顶部下拉 + 航图骨架 + 切岛清理) ----
+  function islandList() {
+    return Object.values(state.islands).sort((a, b) => a.id.localeCompare(b.id));
+  }
+  function islandSummary(isl) {
+    const pop = Object.values(isl.population).reduce((s, p) => s + (p.count || 0), 0);
+    return { id: isl.id, name: isl.name || isl.id, pop: Math.round(pop), isActive: isl.id === state.activeIslandId };
+  }
+  function renderIslandSelect() {
+    const sel = document.getElementById('island-select');
+    if (!sel) return;
+    sel.innerHTML = islandList().map((isl) => {
+      const sum = islandSummary(isl);
+      return '<option value="' + sum.id + '"' + (sum.isActive ? ' selected' : '') + '>' + escapeHtml(sum.name) + ' (' + sum.pop + '人)</option>';
+    }).join('');
+  }
+  // 世界航图:岛列表 + 舰队区(运输/探索/调遣/编辑入口)
+  function renderAtlas() {
+    const el = document.getElementById('atlas-islands');
+    if (!el) return;
+    // [HIGH-5] 全商品选项(运输任意商品)
+    const goodOpts = Object.entries((E.goods && E.goods.GOODS) || {})
+      .map(([gid, g]) => '<option value="' + gid + '">' + (g.icon || '') + (g.name || gid) + '</option>').join('');
+    const goodOptsSel = (cur) => Object.entries((E.goods && E.goods.GOODS) || {})
+      .map(([gid, g]) => '<option value="' + gid + '"' + (gid === cur ? ' selected' : '') + '>' + (g.icon || '') + (g.name || gid) + '</option>').join('');
+    let html = islandList().map((isl) => {
+      const sum = islandSummary(isl);
+      return '<div class="atlas-row' + (sum.isActive ? ' active' : '') + '" data-island="' + sum.id + '">' +
+        '<span class="atlas-name">🏝️ ' + escapeHtml(sum.name) + '</span>' +
+        '<span class="atlas-meta">' + sum.pop + ' 人</span>' +
+        (sum.isActive ? '<span class="atlas-cur">当前</span>' : '') +
+        '</div>';
+    }).join('');
+    // [B-63] 舰队区(骨架):船列表 + 退役(仅 idle)
+    const fleet = Object.values(state.fleet || {});
+    if (fleet.length) {
+      html += '<div class="atlas-sec">🚢 舰队</div>';
+      html += fleet.map((ship) => {
+        const t = E.shipsData && E.shipsData.SHIP_TYPES[ship.type];
+        const islName = (state.islands[ship.currentIslandId] || {}).name || ship.currentIslandId;
+        const statusTxt = ship.status === 'idle' ? '空闲' : (ship.status === 'relocating' ? '🚀 调遣中' : (ship.status === 'expedition' ? '🧭 探索中' : ship.status));
+        let row = '<div class="atlas-row"><span class="atlas-name">⛵ ' + (t ? t.name : ship.type) + '</span>' +
+          '<span class="atlas-meta">' + statusTxt + ' · ' + escapeHtml(islName) + '</span>';
+        if (ship.status === 'idle') {
+          // [B-64/B-68] 空闲船:退役 + 探索发起(四档选择;选项展示成功率与代价)
+          const expOpts = [60, 70, 80, 90].map((x) => {
+            const t = (E.expeditions && E.expeditions.TIERS) ? E.expeditions.TIERS[x] : null;
+            const costTxt = (t && t.cost && Object.keys(t.cost).length)
+              ? Object.entries(t.cost).map(([g, n]) => {
+                const gd = (E.goods && E.goods.GOODS && E.goods.GOODS[g]) || {};
+                return (gd.icon || '') + n + (gd.name || g);
+              }).join(' ')
+              : '仅帆船';
+            return '<option value="' + x + '">' + x + '%档 · 成功率' + (t ? Math.round(t.success * 100) : x) + '%' + (costTxt === '仅帆船' ? ' · ' + costTxt : ' · 需' + costTxt) + '</option>';
+          }).join('');
+          row += '<select class="exp-tier" data-ship="' + ship.id + '">' + expOpts + '</select>' +
+            '<button class="mini-btn" data-go-exp="' + ship.id + '">🧭探索</button>';
+          // [HIGH-5] 航线创建(目标岛 + 双槽商品/速率)+ 调遣入口(REQ-39/41);探索/退役保留
+          const tgtOpts = islandList().filter((i) => i.id !== ship.currentIslandId)
+            .map((i) => '<option value="' + i.id + '">' + escapeHtml(i.name) + '</option>').join('');
+          row += '<span class="rt-create">' +
+            '<select class="exp-tier" data-rt-target="' + ship.id + '">' + (tgtOpts || '<option value="">无目标</option>') + '</select>' +
+            '<select class="exp-tier" data-rt-good="' + ship.id + '">' + goodOpts + '</select>' +
+            '<input type="number" class="exp-tier" data-rt-rate="' + ship.id + '" value="1" min="0.1" max="5" step="0.1" style="width:42px">' +
+            '<select class="exp-tier" data-rt-good2="' + ship.id + '"><option value="">—</option>' + goodOpts + '</select>' +
+            '<input type="number" class="exp-tier" data-rt-rate2="' + ship.id + '" value="0" min="0" max="5" step="0.1" style="width:42px">' +
+            '<button class="mini-btn" data-create-route="' + ship.id + '">🚚创建航线</button></span>' +
+            '<select class="exp-tier" data-relocate-target="' + ship.id + '">' + (tgtOpts || '<option value="">无目标</option>') + '</select>' +
+            '<button class="mini-btn" data-relocate-ship="' + ship.id + '">🚀调遣</button>' +
+            '<button class="mini-btn" data-retire-ship="' + ship.id + '">退役</button>';
+        }
+        return row + '</div>';
+      }).join('');
+    }
+    // [B-65] 航线任务区:状态/槽摘要/暂停恢复/取消
+    const routes = Object.values(state.transportTasks || {});
+    if (routes.length) {
+      html += '<div class="atlas-sec">🚚 航线</div>';
+      html += routes.map((rt) => {
+        const srcName = (state.islands[rt.sourceIslandId] || {}).name || rt.sourceIslandId;
+        const tgtName = (state.islands[rt.targetIslandId] || {}).name || rt.targetIslandId;
+        const slotsTxt = rt.slots.map((s) => (E.goods.name ? E.goods.name(s.good) : s.good) + ' ' + s.rate + '/min').join(' + ');
+        const stTxt = rt.userPaused ? '⏸ 已暂停' : (rt.blockedReason ? '🚧 码头阻塞' : '🚚 运输中');
+        return '<div class="atlas-row"><span class="atlas-name">' + stTxt + ' ' + escapeHtml(srcName) + '→' + escapeHtml(tgtName) + '</span>' +
+          '<span class="rt-edit">' +
+          '<select class="exp-tier" data-eg="' + rt.id + '">' + goodOptsSel(rt.slots[0] ? rt.slots[0].good : '') + '</select>' +
+          '<input type="number" class="exp-tier" data-er="' + rt.id + '" value="' + (rt.slots[0] ? rt.slots[0].rate : 0) + '" min="0" max="5" step="0.1" style="width:42px">' +
+          '<select class="exp-tier" data-eg2="' + rt.id + '"><option value="">—</option>' + goodOptsSel(rt.slots[1] ? rt.slots[1].good : '') + '</select>' +
+          '<input type="number" class="exp-tier" data-er2="' + rt.id + '" value="' + (rt.slots[1] ? rt.slots[1].rate : 0) + '" min="0" max="5" step="0.1" style="width:42px">' +
+          '<button class="mini-btn" data-edit-route="' + rt.id + '">✏️保存</button></span>' +
+          (rt.userPaused
+            ? '<button class="mini-btn" data-resume-route="' + rt.id + '">恢复</button>'
+            : '<button class="mini-btn" data-pause-route="' + rt.id + '">暂停</button>') +
+          '<button class="mini-btn" data-cancel-route="' + rt.id + '">取消</button></div>';
+      }).join('');
+    }
+    // [B-64] 探索任务区:进度 + 放弃
+    const exps = Object.values(state.expeditionTasks || {});
+    if (exps.length) {
+      html += '<div class="atlas-sec">🧭 探索中</div>';
+      html += exps.map((t) => {
+        const mins = Math.ceil(t.remaining / 60);
+        return '<div class="atlas-row"><span class="atlas-name">🧭 ' + t.tier + '% 档</span>' +
+          '<span class="atlas-meta">剩余 ' + mins + ' 分钟</span>' +
+          '<button class="mini-btn" data-abort-exp="' + t.id + '">放弃</button></div>';
+      }).join('');
+    }
+    el.innerHTML = html;
+    el.querySelectorAll('.atlas-row[data-island]').forEach((row) => {
+      row.onclick = () => {
+        switchIsland(row.getAttribute('data-island'));
+        document.getElementById('atlas-overlay').classList.add('hidden');
+      };
+    });
+    // [B-63] 舰队退役按钮(仅 idle;返还 20 木+10 帆到停留岛)
+    el.querySelectorAll('[data-retire-ship]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const r = E.ships.retireShip(state, btn.getAttribute('data-retire-ship'));
+        root.UI.panels.toast(infoEl, r.ok ? '⛵ 船已退役(返还 20 木+10 帆)' : r.reason);
+        renderAtlas();
+        redraw();
+      };
+    });
+    // [HIGH-5] 调遣(REQ-41):idle 船 → 目标已拥有岛(来源岛需有效码头)
+    el.querySelectorAll('[data-relocate-ship]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const shipId = btn.getAttribute('data-relocate-ship');
+        const sel = el.querySelector('[data-relocate-target="' + shipId + '"]');
+        const target = sel ? sel.value : '';
+        if (!target) { root.UI.panels.toast(infoEl, '请选择调遣目标岛'); return; }
+        const r = E.ships.relocateShip(state, shipId, target);
+        root.UI.panels.toast(infoEl, r.ok ? '🚀 调遣出发(10 分钟,途中支付维护)' : r.reason);
+        renderAtlas();
+        redraw();
+      };
+    });
+    // [HIGH-5] 航线编辑(REQ-39):双槽商品/速率热编辑,下一完整 tick 原子生效
+    el.querySelectorAll('[data-edit-route]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const taskId = btn.getAttribute('data-edit-route');
+        const g1 = el.querySelector('[data-eg="' + taskId + '"]');
+        const r1 = parseFloat((el.querySelector('[data-er="' + taskId + '"]') || {}).value) || 0;
+        const g2 = el.querySelector('[data-eg2="' + taskId + '"]');
+        const r2 = parseFloat((el.querySelector('[data-er2="' + taskId + '"]') || {}).value) || 0;
+        const slots = [];
+        if (g1 && g1.value && r1 > 0) slots.push({ good: g1.value, rate: r1 });
+        if (g2 && g2.value && r2 > 0) slots.push({ good: g2.value, rate: r2 });
+        if (!slots.length) { root.UI.panels.toast(infoEl, '至少保留一个有效槽位(商品+速率>0)'); return; }
+        const r = E.transport.editTransportTask(state, taskId, slots);
+        root.UI.panels.toast(infoEl, r.ok ? '✏️ 航线已保存(下一完整 tick 生效)' : r.reason);
+        renderAtlas();
+        redraw();
+      };
+    });
+    // [B-64] 探索发起(四档)/放弃
+    el.querySelectorAll('[data-go-exp]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const shipId = btn.getAttribute('data-go-exp');
+        const sel = el.querySelector('[data-ship="' + shipId + '"]');
+        const tier = sel ? sel.value : '60';
+        const r = E.expeditions.startExpedition(state, shipId, tier);
+        root.UI.panels.toast(infoEl, r.ok ? '🧭 探索已出发(10 分钟,暂停仍推进)' : r.reason);
+        renderAtlas();
+        redraw();
+      };
+    });
+    el.querySelectorAll('[data-abort-exp]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        E.expeditions.abortExpedition(state, btn.getAttribute('data-abort-exp'));
+        root.UI.panels.toast(infoEl, '探索已放弃(投入不返还)');
+        renderAtlas();
+        redraw();
+      };
+    });
+    // [B-65/HIGH-5] 航线:创建(双槽)/暂停/恢复/取消(下一完整 tick 生效)
+    el.querySelectorAll('[data-create-route]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const shipId = btn.getAttribute('data-create-route');
+        const tgt = el.querySelector('[data-rt-target="' + shipId + '"]');
+        const g1 = el.querySelector('[data-rt-good="' + shipId + '"]');
+        const r1 = parseFloat((el.querySelector('[data-rt-rate="' + shipId + '"]') || {}).value) || 0;
+        const g2 = el.querySelector('[data-rt-good2="' + shipId + '"]');
+        const r2 = parseFloat((el.querySelector('[data-rt-rate2="' + shipId + '"]') || {}).value) || 0;
+        const slots = [];
+        if (g1 && g1.value && r1 > 0) slots.push({ good: g1.value, rate: r1 });
+        if (g2 && g2.value && r2 > 0) slots.push({ good: g2.value, rate: r2 });
+        if (!slots.length) {
+          root.UI.panels.toast(infoEl, '请配置至少一个货仓槽(商品+速率>0)');
+          return;
+        }
+        const r = E.transport.createTransportTask(state, shipId, tgt ? tgt.value : '', slots);
+        root.UI.panels.toast(infoEl, r.ok ? '🚚 航线已创建(下一边界开始运输)' : r.reason);
+        renderAtlas();
+        redraw();
+      };
+    });
+    el.querySelectorAll('[data-pause-route]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        E.transport.pauseTransportTask(state, btn.getAttribute('data-pause-route'));
+        root.UI.panels.toast(infoEl, '航线已暂停(下一边界生效,维护照付)');
+        renderAtlas();
+        redraw();
+      };
+    });
+    el.querySelectorAll('[data-resume-route]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        E.transport.resumeTransportTask(state, btn.getAttribute('data-resume-route'));
+        root.UI.panels.toast(infoEl, '航线已恢复');
+        renderAtlas();
+        redraw();
+      };
+    });
+    el.querySelectorAll('[data-cancel-route]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        E.transport.cancelTransportTask(state, btn.getAttribute('data-cancel-route'));
+        root.UI.panels.toast(infoEl, '航线已取消,船将在下一边界空闲');
+        renderAtlas();
+        redraw();
+      };
+    });
+  }
+  // [B-62] 切岛:换 activeIslandId;清理上一岛选中建筑/范围圆/工具模式/旋转/镜头(REQ-33 不污染新岛)
+  function switchIsland(id) {
+    if (!state.islands[id] || id === state.activeIslandId) return;
+    state.activeIslandId = id;
+    selectedBuildingId = null;
+    selectedRadius = null;
+    renderer.setHover(null); // [紧急修复] 清旧岛悬停高亮(防残留叠加)
+    setMode('inspect'); // 重置工具模式 + 预览/半径 + 按钮高亮 + redraw
+    renderer.focusInitialArea(); // 镜头定位新岛(清理上一岛镜头状态)
+    renderIslandSelect();
+    redraw();
+  }
+  const islandSelectEl = document.getElementById('island-select');
+  if (islandSelectEl) islandSelectEl.onchange = (e) => switchIsland(e.target.value);
+  document.getElementById('btn-atlas').onclick = () => {
+    renderAtlas();
+    document.getElementById('atlas-overlay').classList.remove('hidden');
+  };
+  document.getElementById('btn-atlas-close').onclick = () => {
+    document.getElementById('atlas-overlay').classList.add('hidden');
+  };
+  renderIslandSelect();
+
   // ---- 存档钩子 ----
-  window.addEventListener('beforeunload', () => E.save.save(state));
+  window.addEventListener('beforeunload', () => {
+    // [Sol 轮3] 分帧中途退出(含暂停中):补完当前世界 tick,不得序列化半结算状态;不启动新 tick
+    E.tick.finishPendingTick(state);
+    E.save.save(state);
+  });
+
+  // [B-64] 探索独立推进:每真实秒 1 tick,暂停游戏仍推进(REQ-42);关闭页面停止
+  setInterval(() => {
+    const done = E.expeditions.advanceExpeditions(state);
+    if (done.length) {
+      for (const d of done) {
+        if (d.ok) {
+          const name = (state.islands[d.islandId] || {}).name || d.islandId;
+          root.UI.panels.toast(infoEl, '🧭 探索成功!获得新岛「' + name + '」(可切换查看)');
+        } else {
+          root.UI.panels.toast(infoEl, '💥 探索失败,船只与投入损失');
+        }
+      }
+      E.save.save(state); // 探索结果落盘
+      redraw();
+    }
+  }, 1000);
 
   // ---- 启动 ----
   E.economy.refresh(state, { produce: false, logs: false });
@@ -628,24 +989,60 @@
   redraw();
   root.UI.minimap.bind(minimapEl, renderer, () => state); // [V1.8] 小地图点击跳转
 
-  // [V1.2] 产出飘字:订阅 produced 事件 → 渲染器浮字
-  E.events.on('produced', (p) => {
-    const b = state.buildings[p.id];
-    if (!b) return;
-    const gdef = E.goods.GOODS[p.good];
-    renderer.addFloater(b.x, b.y, '+' + p.qty + ' ' + (gdef ? gdef.name : p.good));
-  });
-
   // [V1.6] 每 tick 后刷新面板(时间/经济/目标/日志/建筑菜单)——
   // 此前只在用户交互时刷新,速率与库存显示会滞后
   E.events.on('state-changed', () => redraw());
 
+  // [玩家反馈] 键盘平移:WASD/方向键按住连续移动(帧内执行,与右键拖拽并存)
+  const KEY_MOVE = { w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+  const keys = {};
+  window.addEventListener('keydown', (ev) => {
+    if (KEY_MOVE[ev.key]) { keys[ev.key] = true; ev.preventDefault(); } // 方向键防页面滚动
+  });
+  window.addEventListener('keyup', (ev) => { delete keys[ev.key]; });
+
   // [V1.2] rAF 循环驱动飘字动画(地图每帧重绘,30×30 开销可忽略)
+  // [玩家反馈] 键盘平移并入该帧循环:按住 WASD/方向键每帧移动 ~0.4 格(斜向归一)
+  const KBD_SPEED = 0.4; // 格/帧(@60fps ≈ 24 格/秒)
   function frame() {
-    renderer.draw();
+    let mx = 0, my = 0;
+    for (const k of Object.keys(keys)) {
+      const d = KEY_MOVE[k];
+      if (d) { mx += d[0]; my += d[1]; }
+    }
+    if (mx || my) {
+      const len = Math.hypot(mx, my);
+      const tilePx = renderer.getTileSize ? renderer.getTileSize() : 32;
+      const c = renderer.getCamera();
+      renderer.setCamera(c.x + (mx / len) * KBD_SPEED * tilePx, c.y + (my / len) * KBD_SPEED * tilePx);
+      markDirty(); // [紧急修复] 键盘平移逐帧重绘
+    }
+    // [紧急修复] 脏标记重绘:暂停/静止时跳过全量重绘(4214 人口大档卡顿)
+    // [诊断] draw 异常必须可见:捕获并显示在页面(不再静默冻结);错误写入 state 供诊断
+    if (renderDirty) {
+      try {
+        renderer.draw();
+        renderDirty = false;
+        if (state._drawError) { state._drawError = null; document.title = '蒸汽都市'; }
+      } catch (err) {
+        renderDirty = false; // [诊断] 不重试(避免每帧抛错重绘死循环);错误可见
+        state._drawError = String(err && err.message ? err.message : err) + ' @' + (err && err.stack ? err.stack.split('\n')[1] || '' : '');
+        document.title = '渲染错误: ' + state._drawError;
+        let dbg = document.getElementById('draw-error');
+        if (!dbg) {
+          dbg = document.createElement('div');
+          dbg.id = 'draw-error';
+          dbg.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#c62828;color:#fff;padding:8px;font:12px monospace;white-space:pre-wrap';
+          document.body.appendChild(dbg);
+        }
+        dbg.textContent = '渲染错误: ' + state._drawError;
+      }
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  // [紧急修复] 窗口尺寸变化 → 标记重绘(脏标记模式下 draw 内才检查 canvas 尺寸)
+  window.addEventListener('resize', markDirty);
 
   // [V1.2] 生产链总览开关
   // [V1.10 修订⑤ 顺序21] 欢迎弹窗:每次进入游戏都显示(玩家公告,含最近更新)

@@ -118,50 +118,104 @@
     html += grp('needs', '🍞 需求(已解锁)', needsIds, false);
     html += grp('raw', '🌾 原料', rawIds, false);
     html += grp('other', '📦 其他(未解锁/远期货)', otherIds, false);
+    // [紧急需求] 岛屿禀赋:当前岛矿物 + 植物(玩家规划生产/铺矿场农场)
+    const isl = (state.islands && state.activeIslandId) ? state.islands[state.activeIslandId] : null;
+    if (isl) {
+      const MINERAL_NAMES = { clay: '黏土', iron: '铁', coal: '煤', copper: '铜', zinc: '锌', limestone: '石灰岩', gold: '金' };
+      const MINERAL_ICONS = { clay: '🏺', iron: '⛓️', coal: '⚫', copper: '🟠', zinc: '🔩', limestone: '🪨', gold: '🟡' };
+      const FERT_NAMES = { potato: '土豆', grain: '谷物', hops: '啤酒花', pepper: '胡椒', grapes: '葡萄' };
+      const FERT_ICONS = { potato: '🥔', grain: '🌾', hops: '🍺', pepper: '🌶️', grapes: '🍇' };
+      const depTxt = (isl.deposits || []).map((d) => (MINERAL_ICONS[d] || '') + (MINERAL_NAMES[d] || d)).join(' ') || '无矿物';
+      const ferTxt = (isl.fertilities || []).map((f) => (FERT_ICONS[f] || '') + (FERT_NAMES[f] || f)).join(' ') || '无植物';
+      html += '<div class="ec-group"><div class="ec-group-title">🏝️ 岛屿禀赋 · ' + (isl.name || isl.id) + '</div>' +
+        '<div class="ec-row">⛏️ 矿物 ' + depTxt + '</div>' +
+        '<div class="ec-row">🌱 植物 ' + ferTxt + '</div></div>';
+    }
     el.innerHTML = html;
   }
 
   // 🍽️ 需求 tab:需求满足度(各阶层每需求 bar + 需求 X.X/min)
+  // [服务型需求] market/bar 等无商品定义,显示服务建筑中文名(从 buildings 数据反查)
+  const SERVICE_NAME = {};
+  const SERVICE_ICON = { market: '🏪', bar: '🍺', school: '🏫', church: '⛪', university: '🎓', theater: '🎭', bank: '🏦', powerplant: '⚡', club: '🎩' };
+  (function () {
+    const defs = (root.Engine.buildings && root.Engine.buildings.BUILDINGS) || {};
+    for (const d of Object.values(defs)) {
+      if (d.service && d.service.type) SERVICE_NAME[d.service.type] = d.name;
+    }
+  })();
+  function needName(good) {
+    const g = GOODS[good];
+    if (g) return g.icon + ' ' + g.name;
+    const svc = SERVICE_NAME[good];
+    if (svc) return (SERVICE_ICON[good] || '🏛️') + ' ' + svc;
+    return good;
+  }
   function renderNeeds(el, state) {
     // [M-01] 需求缺口:当前有人的阶层中未满需求
     // [B-42] 每行加「需求 X.X/min」(理论需求=当前人口×rate×60;服务型需求不显示;无负号)
+    // [B-46 fix] 0 人口也显示已解锁阶层的需求列表+收益徽章(开局引导;未解锁阶层仍隐藏)
     let needsHtml = '';
     const needRates = root.Engine.population.currentNeedRates(state);
     for (const [tid, tier] of Object.entries(TIERS)) {
       const pop = state.population[tid];
       const needs = Object.entries(tier.needs || {});
-      if (!needs.length || pop.count <= 0) continue;
+      if (!needs.length) continue;
+      if (!state.unlocks[tid]) continue;
       needsHtml += '<div class="ec-tier">' + tier.name + '</div>';
       for (const [good, need] of needs) {
-        const g = GOODS[good];
         const sat = (pop.needSats || {})[good] ?? 0;
         const pct = Math.round(sat * 100);
         const tierRates = needRates.byTier[tid] || {};
         const rateTxt2 = need.service || !need.rate ? '' : ' 需求 ' + (tierRates[good] || 0).toFixed(1) + '/min';
-        needsHtml += '<div class="ec-need"><span class="ec-need-name">' + (g ? g.icon + ' ' + g.name : good) + '</span>' +
-          '<span class="ec-need-bar"><span class="ec-need-fill' + (pct >= 100 ? ' full' : (pct < 50 ? ' low' : '')) + "' style='width:" + pct + "%'></span></span>" +
+        // [B-46] 收益徽章:告知完成需求后的收益类型(不写具体数值,渐进披露)
+        const perks = [];
+        if (need.influx) perks.push('+人口');
+        if (need.income) perks.push('+钱');
+        if (need.happiness) perks.push('+幸福');
+        const perkHtml = perks.length ? '<span class="ec-perk">' + perks.join(' ') + '</span>' : '';
+        needsHtml += '<div class="ec-need"><span class="ec-need-name">' + needName(good) + '</span>' +
+          '<span class="ec-need-bar"><span class="ec-need-fill' + (pct >= 100 ? ' full' : (pct < 50 ? ' low' : '')) + '" style="width:' + pct + '%"></span></span>' +
           '<span class="ec-need-pct">' + pct + '%</span>' +
-          '<span class="ec-need-rate">' + rateTxt2 + '</span></div>';
+          '<span class="ec-need-rate">' + rateTxt2 + '</span>' + perkHtml + '</div>';
       }
     }
     el.innerHTML = needsHtml || '<div class="ec-empty">暂无人口需求数据</div>';
   }
 
-  // 👷 人口 tab:人口总览(各阶层数量/趋势/幸福度)
+  // 👷 人口 tab:分行显示各阶层(人口/岗位/幸福度)+ 总人口趋势 + 总幸福度
+  // [B-50] 需求更新:各阶级分行;显示当前人口与所需劳动力(岗位);各阶层幸福度;总幸福度
   function renderPop(el, state) {
     const rates = state.rates || {};
-    // [M-01 fix] 箭头与 /min 数值统一用引擎 60 tick 平滑口径(smoothMin),
-    // 不再用"本次 render 与上次 render 的差值"(额外 redraw 会把箭头误置为 →)
+    // [M-01 fix] 箭头与 /min 数值统一用引擎 60 tick 平滑口径(smoothMin)
     const popRate = rates['__pop'] ? rates['__pop'].smoothMin : 0;
     const trend = popRate > 0.05 ? '↑' : (popRate < -0.05 ? '↓' : '→');
     const popTrendTxt = Math.abs(popRate) >= 0.05 ? ' ' + (popRate > 0 ? '+' : '') + popRate.toFixed(1) + '/min' : '';
-    let popParts = [];
-    for (const id of Object.keys(TIERS)) {
-      popParts.push(TIERS[id].name + ' ' + Math.round(state.population[id].count) + (state.unlocks[id] ? '' : '🔒'));
+    const totalPop = Object.values(state.population).reduce((s, p) => s + (p.count || 0), 0);
+    let html = '<div class="ec-overview">👥 总人口 ' + Math.round(totalPop) + trend + popTrendTxt +
+      '<br>😊 总幸福度 ' + state.happiness + '%</div>';
+    const TIER_ORDER = ['farmers', 'workers', 'artisans', 'engineers', 'investors'];
+    const wf = state._wf || {};
+    for (const tid of TIER_ORDER) {
+      const t = TIERS[tid];
+      const pop = state.population[tid];
+      if (!t || !pop) continue;
+      let line = '';
+      if (state.unlocks[tid]) {
+        line += t.name + ' ' + Math.round(pop.count) + ' 人';
+        const w = wf[tid];
+        if (w && w.need > 0) line += ' · 岗位 ' + w.need + '/' + Math.floor(w.pop) + '(' + Math.round(w.eff * 100) + '%)';
+        if (pop.happiness) line += ' · 😊 ' + Math.round(pop.happiness) + '%';
+      } else {
+        // 未解锁:显示解锁条件(与建造菜单口径一致:上一阶层人口阈值;999999=暂未开放)
+        const idx = TIER_ORDER.indexOf(tid);
+        const prev = idx > 0 ? TIER_ORDER[idx - 1] : null;
+        const req = (prev && t.unlockAt < 999999) ? '需' + TIERS[prev].name + ' ' + t.unlockAt : '暂未开放';
+        line += t.name + ' 0 人 🔒 ' + req;
+      }
+      html += '<div class="pop-row">' + line + '</div>';
     }
-    const overview = '<div class="ec-overview">👥 ' + popParts.join(' ') + trend + popTrendTxt +
-      '<br>😊 幸福度 ' + state.happiness + '%</div>';
-    el.innerHTML = overview;
+    el.innerHTML = html;
   }
 
   root.UI = root.UI || {};

@@ -12,7 +12,9 @@
     "cost": {
       "wood": 2
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -31,7 +33,9 @@
     "category": "住宅",
     "tier": "workers",
     "cost": {},
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -54,7 +58,9 @@
     "cost": {
       "wood": 2
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -76,7 +82,9 @@
     "category": "住宅",
     "tier": "engineers",
     "cost": {},
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -99,7 +107,9 @@
     "category": "住宅",
     "tier": "investors",
     "cost": {},
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -114,7 +124,9 @@
     "cost": {
       "coin": 100
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 4
@@ -129,7 +141,7 @@
       "workforce": {
         "farmers": 5
       },
-      "radius": 7,
+      "radius": 7
     }
   },
   "boardmill": {
@@ -140,7 +152,9 @@
     "cost": {
       "coin": 100
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -192,7 +206,9 @@
       "coin": 100,
       "wood": 2
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -207,7 +223,7 @@
       "workforce": {
         "farmers": 20
       },
-      "radius": 12,
+      "radius": 12
     }
   },
   "distillery": {
@@ -218,7 +234,9 @@
     "cost": {
       "coin": 100
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -246,7 +264,9 @@
       "coin": 100,
       "wood": 2
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -261,7 +281,7 @@
       "workforce": {
         "farmers": 10
       },
-      "radius": 5,
+      "radius": 5
     }
   },
   "tailor": {
@@ -272,7 +292,9 @@
     "cost": {
       "coin": 400
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 4
@@ -326,7 +348,9 @@
       "coin": 500,
       "wood": 8
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -354,7 +378,9 @@
       "coin": 500,
       "wood": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -367,7 +393,7 @@
         "pig": 1
       },
       "workforce": {},
-      "radius": 5,
+      "radius": 5
     }
   },
   "sausageFactory": {
@@ -380,7 +406,9 @@
       "wood": 4,
       "brick": 5
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -408,7 +436,9 @@
       "coin": 500,
       "wood": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -421,7 +451,7 @@
         "grain": 1
       },
       "workforce": {},
-      "radius": 24,
+      "radius": 24
     }
   },
   "mill": {
@@ -434,7 +464,9 @@
       "wood": 4,
       "brick": 5
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -463,7 +495,9 @@
       "wood": 4,
       "brick": 5
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -492,7 +526,9 @@
       "wood": 4,
       "brick": 5
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -546,7 +582,9 @@
       "wood": 4,
       "brick": 5
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 7
@@ -576,7 +614,9 @@
       "wood": 8,
       "brick": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 10
@@ -606,7 +646,9 @@
       "brick": 5,
       "steel": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 3
@@ -636,7 +678,9 @@
       "brick": 5,
       "steel": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 4
@@ -664,7 +708,9 @@
       "coin": 500,
       "wood": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -677,7 +723,7 @@
         "hops": 1
       },
       "workforce": {},
-      "radius": 16,
+      "radius": 16
     }
   },
   "maltWorks": {
@@ -691,7 +737,9 @@
       "brick": 5,
       "steel": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 5
@@ -721,7 +769,9 @@
       "brick": 5,
       "steel": 4
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 5
@@ -777,7 +827,9 @@
       "brick": 10,
       "steel": 8
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 6
@@ -807,7 +859,9 @@
       "brick": 20,
       "steel": 16
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -836,7 +890,9 @@
       "coin": 2000,
       "wood": 6
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 5
@@ -849,7 +905,7 @@
         "beef": 1
       },
       "workforce": {},
-      "radius": 8,
+      "radius": 8
     }
   },
   "pepperFarm": {
@@ -861,7 +917,9 @@
       "coin": 2000,
       "wood": 6
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -874,7 +932,7 @@
         "pepper": 1
       },
       "workforce": {},
-      "radius": 18,
+      "radius": 18
     }
   },
   "artisanKitchen": {
@@ -889,7 +947,9 @@
       "steel": 8,
       "windows": 8
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -921,7 +981,9 @@
       "steel": 8,
       "windows": 8
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -978,7 +1040,9 @@
       "steel": 8,
       "windows": 8
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 9
@@ -1010,7 +1074,9 @@
       "steel": 24,
       "windows": 25
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 6
@@ -1043,7 +1109,9 @@
       "windows": 20,
       "concrete": 20
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 9
@@ -1098,7 +1166,9 @@
       "coin": 8000,
       "wood": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 3,
       "h": 4
@@ -1235,7 +1305,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -1265,7 +1337,9 @@
       "steel": 16,
       "windows": 15
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 6
@@ -1295,7 +1369,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 6
@@ -1327,7 +1403,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 7
@@ -1359,7 +1437,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 7
@@ -1390,7 +1470,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 6
@@ -1422,7 +1504,9 @@
       "steel": 16,
       "windows": 15
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -1451,7 +1535,9 @@
       "steel": 16,
       "windows": 15
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 7,
       "h": 7
@@ -1481,7 +1567,9 @@
       "steel": 12,
       "windows": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -1496,6 +1584,78 @@
       "workforce": {}
     }
   },
+  "sailMaker": {
+    "id": "sailMaker",
+    "name": "制帆厂",
+    "category": "生产",
+    "tier": "workers",
+    "cost": {
+      "coin": 500,
+      "wood": 8,
+      "brick": 10
+    },
+    "terrain": [
+      "plain"
+    ],
+    "size": {
+      "w": 5,
+      "h": 5
+    },
+    "maintenance": 75,
+    "production": {
+      "cycle": 30,
+      "inputs": {
+        "wool": 1
+      },
+      "outputs": {
+        "sail": 1
+      },
+      "workforce": {
+        "workers": 50
+      }
+    }
+  },
+  "sailingShipyard": {
+    "id": "sailingShipyard",
+    "name": "帆船造船厂",
+    "category": "生产",
+    "tier": "workers",
+    "cost": {
+      "coin": 10000,
+      "wood": 20,
+      "brick": 25
+    },
+    "terrain": "coast",
+    "size": {
+      "w": 6,
+      "h": 17
+    },
+    "maintenance": 100,
+    "production": {
+      "cycle": 0,
+      "inputs": {},
+      "outputs": {},
+      "workforce": {
+        "workers": 100
+      }
+    }
+  },
+  "port": {
+    "id": "port",
+    "name": "码头",
+    "category": "生产",
+    "tier": "workers",
+    "cost": {
+      "coin": 2500,
+      "wood": 10,
+      "steel": 8
+    },
+    "terrain": "coast",
+    "size": {
+      "w": 7,
+      "h": 11
+    }
+  },
   "warehouse": {
     "id": "warehouse",
     "name": "仓库",
@@ -1505,7 +1665,9 @@
       "coin": 500,
       "wood": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -1526,7 +1688,9 @@
       "coin": 500,
       "wood": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 6
@@ -1546,7 +1710,9 @@
       "coin": 500,
       "wood": 10
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 6
@@ -1568,7 +1734,9 @@
       "brick": 25,
       "steel": 20
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 6
@@ -1589,7 +1757,9 @@
       "wood": 20,
       "brick": 20
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 8
@@ -1612,7 +1782,9 @@
       "steel": 40,
       "windows": 40
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 9
@@ -1635,7 +1807,9 @@
       "steel": 40,
       "windows": 40
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 4,
       "h": 5
@@ -1659,7 +1833,9 @@
       "windows": 60,
       "concrete": 50
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 12,
       "h": 10
@@ -1682,7 +1858,9 @@
       "steel": 40,
       "windows": 30
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 5,
       "h": 5
@@ -1706,7 +1884,9 @@
       "windows": 75,
       "concrete": 75
     },
-    "terrain": ["plain"],
+    "terrain": [
+      "plain"
+    ],
     "size": {
       "w": 6,
       "h": 6

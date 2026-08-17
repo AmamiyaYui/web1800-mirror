@@ -2,6 +2,57 @@
 (function (root) {
   'use strict';
 
+  // [岗位制 S1] 阶层中文名(岗位行/信息卡共用)
+  const TIER_CN = { farmers: '农民', workers: '工人', artisans: '工匠', engineers: '工程师', investors: '投资人' };
+
+  // [B-45] 建造信息卡:造价/材料/维护/周期/输入/输出/劳动力/占地(放置模式与已建建筑共用;纯定义信息,无状态行)
+  // [用户确认] eff 参数:已建建筑按当前效率显示实际产出(效率<100% 时标注满速);放置模式不传=满速
+  // [B-52] 速率格式化:保留 1 位小数去尾零(4→"4",0.67→"0.7"),避免 Math.round 把长周期建筑 0.5~1.4/min 误导为 1/min
+  function fmtRate(v) {
+    const r = Math.round(v * 10) / 10;
+    return String(r);
+  }
+  function infoCardHtml(def, eff) {
+    const goods = Engine.goods.name;
+    let h = '';
+    const costEntries = Object.entries(def.cost || {});
+    if (costEntries.length) {
+      const coin = costEntries.filter(([g]) => g === 'coin').map(([, q]) => '💰' + q);
+      const mats = costEntries.filter(([g]) => g !== 'coin').map(([g, q]) => goods(g) + '×' + q);
+      h += '<div>💰 造价:' + [coin.join(' '), mats.join(' ')].filter(Boolean).join(' ') + '</div>';
+    }
+    if (def.maintenance) h += '<div>⚙️ 维护:💰' + def.maintenance + '/min</div>';
+    const p = def.production;
+    if (p) {
+      if (p.cycle) h += '<div>🔄 周期:' + p.cycle + ' 秒</div>';
+      const applyEff = eff != null && eff < 0.999;
+      const fmtQ = (q) => (Number.isInteger(q) ? String(q) : String(Math.round(q * 100) / 100));
+      const rateTxt = (q) => (p.cycle ? ' (' + fmtRate(q / p.cycle * 60) + '/min)' : '');
+      const inT = Object.entries(p.inputs || {}).map(([g, q]) => goods(g) + '×' + fmtQ(q) + '/周期' + rateTxt(q)).join(', ') || '无';
+      const outT = Object.entries(p.outputs || {}).map(([g, q]) => {
+        const qty = applyEff ? q * eff : q;
+        let s = goods(g) + '×' + fmtQ(qty) + '/周期' + rateTxt(qty);
+        if (applyEff) s += ' · 满速' + rateTxt(q).replace(/[()]/g, '');
+        return s;
+      }).join(', ') || '无';
+      h += '<div>⬇ 输入:' + inT + '</div><div>⬆ 输出:' + outT + '</div>';
+      const wf = Object.entries(p.workforce || {}).map(([t, q]) => (TIER_CN[t] || t) + '×' + q).join(', ');
+      if (wf) h += '<div>👷 劳动力:' + wf + '</div>';
+    }
+    if (def.service) h += '<div>📡 服务半径:' + def.service.radius + '</div>';
+    if (def.capacity) h += '<div>🏠 容量:' + def.capacity + ' 人</div>';
+    if (def.size) h += '<div>📐 占地:' + def.size.w + '×' + def.size.h + '</div>';
+    if (p && p.radius) h += '<div>📍 开发半径:' + p.radius + '</div>';
+    return h;
+  }
+
+  // [B-45] 放置模式信息卡(未建造,仅定义信息;由 main.js 在放置/移动模式时调用)
+  function showPlacementInfo(el, def) {
+    if (!def) { el.innerHTML = '<div class="panel-title">信息</div><div>点击建筑查看详情</div>'; return; }
+    el.innerHTML = '<div class="panel-title">🛠 ' + def.name + '</div>' +
+      '<div>🖱 点击地图放置 · R 旋转 · Esc 取消</div>' + infoCardHtml(def);
+  }
+
   // [V1.10 修订⑤ 顺序14] 住宅升级入口:上一级住宅 → 下一级(条件=全部基础需求+建材,引擎判定)
   // [V1.10 修订⑤ 顺序23] 移动建筑入口(onMove 回调)
   function showBuilding(el, state, buildingId, onUpgrade, onMove) {
@@ -18,6 +69,7 @@
     // [H-03] 停工原因中文化 + 数值细节 + 下一步建议
     const REASON_TEXT = {
       'road-disconnected': { t: '⚠️ 道路断开,未连通仓库', tip: '铺路连接到任意仓库' },
+      'no-road': { t: '⚠️ 民居未接触道路', tip: '在民居旁铺路(无需连接仓库)' },
       'workforce-shortage': { t: '⏳ 劳动力不足', tip: '建造住宅并满足其需求以增加人口' },
       'input-shortage': { t: '⏳ 缺少原料', tip: '补齐对应原料生产链,或检查上游是否停产' },
       'warehouse-out-of-range': { t: '⏳ 超出仓库服务范围', tip: '把建筑移到仓库服务范围内,或新建仓库' },
@@ -43,22 +95,57 @@
     html += '<div>' + statusLine + '</div>';
     if (rInfo.tip) html += '<div class="tip-line">💡 ' + rInfo.tip + '</div>';
     html += '<div>位置:(' + b.x + ',' + b.y + ')</div>';
-    if (def.production) {
-      // [H-03 fix] 商品/阶层名中文化(不暴露 log/farmers 等内部 ID)
-      const tierName = { farmers: '农民', workers: '工人', artisans: '工匠', engineers: '工程师', investors: '投资人' };
-      const inT = Object.entries(def.production.inputs || {}).map(([g, q]) => Engine.goods.name(g) + '×' + q).join(', ') || '无';
-      const outT = Object.entries(def.production.outputs || {}).map(([g, q]) => Engine.goods.name(g) + '×' + q).join(', ');
-      const wf = Object.entries(def.production.workforce || {}).map(([t, q]) => (tierName[t] || t) + ':' + q).join(', ');
-      html += '<div>消耗:' + inT + '</div><div>产出:' + outT + '</div><div>劳动力:' + wf + '</div>';
-      // [用户要求] 农田/牧场/伐木类:可开发度 + 当前生产效率(开发度=未占用地块占比)
-      if (def.production.radius) {
-        let dev = 0;
-        try { dev = Engine.economy.developmentRatio(state, b, def); } catch (e) { /* 忽略 */ }
-        const open = Math.round((1 - dev) * 100);
-        const effPct = Math.round(Engine.economy.efficiencyFor(dev) * 100);
-        html += '<div>可开发:' + open + '%</div><div>当前效率:' + effPct + '%</div>';
+    // [B-63] 造船厂订单区:队列(等待/建造中)+ 下单/取消(REQ-39/AC-21)
+    if (b.type === 'sailingShipyard' && root.Engine.ships && root.Engine.shipsData) {
+      const ships = root.Engine.ships;
+      const orders = ships.ordersOf(state, state.activeIslandId, b.id);
+      const limit = root.Engine.shipsData.SHIPYARD_ORDER_LIMIT;
+      const type = root.Engine.shipsData.SHIP_TYPES[Object.keys(root.Engine.shipsData.SHIP_TYPES)[0]];
+      let orderHtml = '';
+      for (const o of orders) {
+        const pct = o.totalWork > 0 ? Math.round((o.totalWork - o.remainingWork) / o.totalWork * 100) : 0;
+        const tag = pct === 0 ? '⏳ 等待' : '🔨 建造中 ' + pct + '%';
+        orderHtml += '<div class="order-row"><span>' + tag + ' · ' + (type ? type.name : o.shipType) + '</span>' +
+          '<button class="mini-btn" data-cancel-order="' + o.id + '">取消</button></div>';
+      }
+      html += '<div class="order-sec">🚢 造船订单 (' + orders.length + '/' + limit + ')' +
+        (orderHtml || '<div class="order-empty">无订单</div>') + '</div>';
+      if (orders.length < limit) {
+        html += '<button class="mini-btn" id="btn-ship-order" data-shipyard="' + b.id + '">🛠️ 下单(' +
+          (type ? type.cost.coin + '金+' + type.cost.wood + '木+' + type.cost.sail + '帆 · ' + Math.round(type.workTicks / 60) + '分钟' : '') +
+          ')</button>';
       }
     }
+    // [岗位制 S1] 岗位行 + 综合效率(开发度 × 岗位):先算再传信息卡(实际产出)
+    let effDev = null, effWf = null;
+    if (def.production && def.production.workforce) {
+      const wfParts = [];
+      for (const [tier, need] of Object.entries(def.production.workforce)) {
+        const w = (state._wf || {})[tier];
+        if (w) {
+          wfParts.push((TIER_CN[tier] || tier) + ' 岗位 ' + w.need + '/' + Math.floor(w.pop) + '(' + Math.round(w.eff * 100) + '%)');
+          effWf = effWf == null ? w.eff : Math.min(effWf, w.eff);
+        }
+      }
+      if (wfParts.length) html += '<div>⚙️ ' + wfParts.join(' ') + '</div>';
+    }
+    if (def.production && def.production.radius) {
+      // [用户要求] 农田/牧场/伐木类:可开发度 + 综合生产效率(开发度=未占用地块占比)
+      let dev = 0;
+      try { dev = Engine.economy.developmentRatio(state, b, def); } catch (e) { /* 忽略 */ }
+      effDev = Engine.economy.efficiencyFor(dev);
+      const open = Math.round((1 - dev) * 100);
+      const effTotal = effDev * (effWf == null ? 1 : effWf);
+      let effLine = '当前效率:' + Math.round(effDev * 100) + '%(开发度)';
+      if (effWf != null) effLine += '×' + Math.round(effWf * 100) + '%(岗位)';
+      effLine += '≈' + Math.round(effTotal * 100) + '%';
+      html += '<div>可开发:' + open + '%</div><div>' + effLine + '</div>';
+    } else if (effWf != null && effWf < 0.999) {
+      // 普通生产建筑:仅岗位效率
+      html += '<div>当前效率:' + Math.round(effWf * 100) + '%(岗位)</div>';
+    }
+    const effTotal = (effDev == null ? 1 : effDev) * (effWf == null ? 1 : effWf);
+    html += infoCardHtml(def, effTotal < 0.999 ? effTotal : null);
     if (def.capacity) {
       // [玩家反馈 #4] 住户显示 当前人数/容量(引擎 refreshOccupancy 分配单栋住户)
       const occ = Math.round(b.occupied || 0);
@@ -154,7 +241,7 @@
   let issueFilter = null; // 当前展开的过滤器('waiting'/'disconnected'/null)
   let issueIdx = 0; // 当前查看的条目下标(列表变化时 clamp)
   const reasonCn = {
-    'road-disconnected': '断连', 'workforce-shortage': '缺人力', 'input-shortage': '缺原料',
+    'road-disconnected': '断连', 'no-road': '无路', 'workforce-shortage': '缺人力', 'input-shortage': '缺原料',
     'warehouse-out-of-range': '超范围', 'development-too-low': '开发度过高',
   };
   function renderIssues(el, state, items, onLocate) {
@@ -211,5 +298,5 @@
   }
 
   root.UI = root.UI || {};
-  root.UI.panels = { showBuilding, appendLog, updateLog, updateStats, toast };
+  root.UI.panels = { showBuilding, showPlacementInfo, appendLog, updateLog, updateStats, toast };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

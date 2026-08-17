@@ -4,6 +4,6 @@ set -e
 cd "$(dirname "$0")/.."
 rm -rf deploy
 mkdir -p deploy
-cp -r index.html admin.html style.css src assets deploy/
+cp -r index.html admin.html save-transfer.html style.css src assets deploy/
 echo "deploy/ 已组装:"
 ls deploy

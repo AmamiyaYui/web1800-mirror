@@ -129,7 +129,9 @@
     return placed;
   }
 
-  function generateMap(size, seed) {
+  // [B-64] 按 deposits 列表生成矿物(REQ-37:每岛只为入选矿物生成矿床,分级组数)
+  // deposits=null 表示全部 7 种(兼容旧 generateMap);黏土 5×5,其余 3×3
+  function generateIsland(size, seed, deposits) {
     size = size || 128;
     seed = (seed === undefined || seed === null) ? ((Math.random() * 0xFFFFFFFF) >>> 0) : (seed >>> 0);
     const rng = mulberry32(seed);
@@ -261,19 +263,40 @@
       else near.push([oreCandidates[i][0], oreCandidates[i][1]]);
     }
     const used = new Set();
-    const goldBlocks = 1 + Math.floor(rng() * 2);   // 1~2 块(9~18 格)
-    const copperBlocks = 3 + Math.floor(rng() * 2); // 3~4 块(27~36 格,恒 > 金)
-    const ironBlocks = 5 + Math.floor(rng() * 2);   // 5~6 块(45~54 格,恒 > 铜)
-    placeBlocks(t, size, far, goldBlocks, T_GOLD, used, rng);
-    placeBlocks(t, size, mid, copperBlocks, T_COPPER, used, rng);
-    placeBlocks(t, size, near.concat(far, mid), ironBlocks, T_IRON, used, rng);
-    // [修订⑤ 顺序8] 煤矿(工匠层,需求大)/锌矿/石灰岩矿:贴山缘 3×3(铁>铜>金>煤>锌>石灰岩)
-    const coalBlocks = 4 + Math.floor(rng() * 2);        // 4~5 块
-    const zincBlocks = 2 + Math.floor(rng() * 2);        // 2~3 块
-    const limestoneBlocks = 2 + Math.floor(rng() * 2);   // 2~3 块
-    placeBlocks(t, size, near.concat(far, mid), coalBlocks, T_COAL, used, rng);
-    placeBlocks(t, size, near.concat(far, mid), zincBlocks, T_ZINC, used, rng);
-    placeBlocks(t, size, near.concat(far, mid), limestoneBlocks, T_LIMESTONE, used, rng);
+    const want = (m) => !deposits || deposits.indexOf(m) >= 0;
+    // [Sol 轮3] 记录每种矿物本次抽定的目标组数(AC-20:校验须达到抽定值而非仅 min)
+    const drawn = {};
+    if (want('gold')) {
+      const goldBlocks = 1 + Math.floor(rng() * 2); // 1~2 块(REQ-37 分级)
+      drawn.gold = goldBlocks;
+      placeBlocks(t, size, far, goldBlocks, T_GOLD, used, rng);
+    }
+    if (want('copper')) {
+      const copperBlocks = 3 + Math.floor(rng() * 2); // 3~4 块
+      drawn.copper = copperBlocks;
+      placeBlocks(t, size, mid, copperBlocks, T_COPPER, used, rng);
+    }
+    if (want('iron')) {
+      const ironBlocks = 5 + Math.floor(rng() * 2); // 5~6 块
+      drawn.iron = ironBlocks;
+      placeBlocks(t, size, near.concat(far, mid), ironBlocks, T_IRON, used, rng);
+    }
+    // [修订⑤ 顺序8] 煤矿/锌矿/石灰岩矿:贴山缘 3×3
+    if (want('coal')) {
+      const coalBlocks = 4 + Math.floor(rng() * 2); // 4~5 块
+      drawn.coal = coalBlocks;
+      placeBlocks(t, size, near.concat(far, mid), coalBlocks, T_COAL, used, rng);
+    }
+    if (want('zinc')) {
+      const zincBlocks = 2 + Math.floor(rng() * 2); // 2~3 块
+      drawn.zinc = zincBlocks;
+      placeBlocks(t, size, near.concat(far, mid), zincBlocks, T_ZINC, used, rng);
+    }
+    if (want('limestone')) {
+      const limestoneBlocks = 2 + Math.floor(rng() * 2); // 2~3 块
+      drawn.limestone = limestoneBlocks;
+      placeBlocks(t, size, near.concat(far, mid), limestoneBlocks, T_LIMESTONE, used, rng);
+    }
 
     // 6. 黏土 5×5 块:海岸带(块内至少一格邻水),不贴山(8 邻无山);[V1.10] 5×5 匹配原版黏土坑
     {
@@ -299,8 +322,11 @@
         }
         if (ok && touchesWater && !touchesMountain) candidates.push([x, y]);
       }
-      const clayBlocks = 3 + Math.floor(rng() * 2); // 3~4 块 × 25 格
-      placeBlocks(t, size, candidates, clayBlocks, T_CLAY, used, rng, BS);
+      if (!deposits || deposits.indexOf('clay') >= 0) {
+        const clayBlocks = 3 + Math.floor(rng() * 2); // 3~4 块 × 25 格(REQ-37 分级)
+        drawn.clay = clayBlocks;
+        placeBlocks(t, size, candidates, clayBlocks, T_CLAY, used, rng, BS);
+      }
     }
 
     // 7. [用户决策] 生态带森林已移除(森林地形与机制全部下线,地形码 1 不再生成)
@@ -316,10 +342,17 @@
       }
     }
 
+    // [Sol 轮3] 暴露本次抽定组数(挂数组属性,兼容 Array.isArray 调用方;JSON 序列化不保留,存档无此字段)
+    t.drawnGroups = drawn;
     return t;
   }
 
-  const api = { generateMap };
+  // 兼容入口:全部 7 种矿物(旧行为;新游戏主岛由 state.js 传 MAIN_DEPOSITS)
+  function generateMap(size, seed) {
+    return generateIsland(size, seed, null);
+  }
+
+  const api = { generateMap, generateIsland };
   root.Engine = root.Engine || {};
   root.Engine.mapTemplate = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

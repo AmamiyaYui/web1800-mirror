@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>蒸汽都市 · 存档迁移</title>
+<!-- 复用游戏存档校验,保证"工具页说成功 = 游戏能读" -->
+<script src="src/engine/data/tiers.js?v=184"></script>
+<script src="src/engine/data/buildings-data.js?v=184"></script>
+<script src="src/engine/data/buildings.js?v=184"></script>
+<script src="src/engine/data/map-template.js?v=184"></script>
+<script src="src/engine/data/world-data.js?v=184"></script>
+<script src="src/engine/events.js?v=184"></script>
+<script src="src/engine/state.js?v=184"></script>
+<script src="src/engine/connectivity.js?v=184"></script>
+<script src="src/engine/economy.js?v=184"></script>
+<script src="src/engine/placement.js?v=184"></script>
+<script src="src/engine/save.js?v=184"></script>
+<script src="src/tools/save-transfer.js?v=184"></script>
+<style>
+  :root {
+    --bg: #14181f;
+    --card: #1d232d;
+    --border: #2e3947;
+    --text: #d7dde5;
+    --muted: #8a95a3;
+    --accent: #e0a458;
+    --ok: #6fcf7a;
+    --err: #e06c5f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 24px; color: var(--accent); margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  ol { margin: 0 0 14px; padding-left: 20px; }
+  li { margin-bottom: 6px; font-size: 14px; }
+  .opt { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  button, input[type=file] {
+    background: #26303d;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #btn-export { background: #3a4a24; }
+  #btn-import { background: #2c3a52; }
+  #btn-delete-pre { background: #542b2b; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .msg { margin-top: 10px; font-size: 13px; min-height: 20px; white-space: pre-wrap; }
+  .msg.ok { color: var(--ok); }
+  .msg.err { color: var(--err); }
+  .tips { margin-top: 16px; }
+  .tips ul { margin: 0; padding-left: 20px; font-size: 14px; }
+  .tips li { margin-bottom: 6px; }
+  #status-body { font-size: 14px; }
+  .stat-row { display: flex; gap: 18px; flex-wrap: wrap; }
+  .stat { background: #161c25; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 110px; }
+  .stat b { display: block; font-size: 20px; color: var(--accent); }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .file-wrap { margin: 4px 0 10px; }
+  .file-wrap input[type=file] { width: 100%; }
+  .note { font-size: 13px; color: var(--muted); }
+  code { background: #10141a; padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>⚙️ 蒸汽都市 · 存档迁移</h1>
+  <p class="sub">把存档从一台设备搬到另一台设备。只读写浏览器本地存档，不上传任何数据，也不改动游戏本体。</p>
+
+  <section class="card" style="margin-bottom:16px">
+    <h2>📊 本机存档状态</h2>
+    <div id="status-body">读取中…</div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>📥 ① 导出（旧设备）</h2>
+      <ol>
+        <li>在旧设备打开本页（和游戏同一个网址）</li>
+        <li>点击下方按钮，下载 <code>web1800-save-backup.json</code></li>
+        <li>把文件发给新设备（QQ / 网盘 / 数据线）</li>
+      </ol>
+      <label class="opt"><input type="checkbox" id="opt-bak" checked> 一并导出损坏自动备份（.bak）</label>
+      <label class="opt"><input type="checkbox" id="opt-pre" checked> 一并导出迁移前永久原档</label>
+      <label class="opt"><input type="checkbox" id="opt-ui" checked> 一并导出界面布局偏好（侧栏 Tab / 折叠）</label>
+      <button id="btn-export">📥 导出存档文件</button>
+      <div id="export-msg" class="msg"></div>
+    </section>
+
+    <section class="card">
+      <h2>📤 ② 导入（新设备）</h2>
+      <ol>
+        <li>在新设备打开本页（<b>同一个网址域名</b>）</li>
+        <li>选择刚才的 <code>.json</code> 文件</li>
+        <li>导入成功后，打开游戏页面继续玩</li>
+      </ol>
+      <div class="file-wrap"><input type="file" id="file-input" accept=".json,application/json"></div>
+      <button id="btn-import">📤 导入存档文件</button>
+      <div id="import-msg" class="msg"></div>
+    </section>
+  </div>
+
+  <section class="card tips">
+    <h2>🛟 迁移前永久原档</h2>
+    <div id="pre-status" class="note">读取中…</div>
+    <div class="actions" style="margin-top:12px">
+      <button id="btn-download-pre">📥 单独下载原档</button>
+      <button id="btn-restore-pre">↩️ 恢复为当前主档</button>
+      <button id="btn-delete-pre">🗑️ 永久删除原档</button>
+    </div>
+    <div id="pre-msg" class="msg"></div>
+  </section>
+
+  <section class="card tips">
+    <h2>⚠️ 注意事项</h2>
+    <ul>
+      <li>导入前请<b>关闭所有已打开的游戏页面</b>——游戏的自动存档每秒写入，会把刚导入的存档覆盖掉。</li>
+      <li>存档保存在<b>浏览器 + 域名</b>下：两台设备必须访问同一个网址域名（且用同一浏览器），否则互相读不到。</li>
+      <li>本页完全本地运行：不联网、不上传，导出文件只包含你的游戏存档内容。</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var Save = window.Engine.save;
+  var Core = window.SaveTransferCore;
+  var SAVE_KEY = Save.SAVE_KEY;
+  var BAK_KEY = Save.BAK_KEY;
+  var PRE_MULTI_BACKUP_KEY = Save.PRE_MULTI_BACKUP_KEY;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function lsGet(k) {
+    try { return localStorage.getItem(k); } catch (e) { return null; }
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return '未知';
+    var d = new Date(ts);
+    function p(n) { return String(n).padStart(2, '0'); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  // 解析v1/v2存档摘要(只展示,不迁移)
+  function summarize(raw) {
+    return raw ? Core.summarize(raw) : { ok: false };
+  }
+
+  function exportContainer(includeBak, includeUi, includePreMigration) {
+    return Core.exportContainer(localStorage, Save, {
+      includeBak: includeBak,
+      includeUi: includeUi,
+      includePreMigration: includePreMigration,
+    });
+  }
+
+  function applyImport(container) {
+    return Core.applyImport(localStorage, Save, container);
+  }
+
+  // ---- UI ----
+  function renderStatus() {
+    var el = $('status-body');
+    var raw = lsGet(SAVE_KEY);
+    var info = summarize(raw);
+    if (!info.ok) {
+      el.innerHTML = '<span class="note">本机暂无存档。先在游戏里玩一会儿，再回来导出。</span>';
+      $('btn-export').disabled = true;
+      return;
+    }
+    $('btn-export').disabled = false;
+    var coinTxt = info.coin === null ? '—' : Math.floor(info.coin).toLocaleString();
+    el.innerHTML =
+      '<div class="stat-row">' +
+        '<div class="stat"><b>' + info.buildings + '</b><span>🏗️ 建筑</span></div>' +
+        '<div class="stat"><b>' + info.population + '</b><span>👷 人口</span></div>' +
+        '<div class="stat"><b>' + coinTxt + '</b><span>💰 金币</span></div>' +
+        '<div class="stat"><b>' + info.mapSize + '×' + info.mapSize + '</b><span>🗺️ 活动岛</span></div>' +
+      '</div>' +
+      '<p class="note" style="margin:10px 0 0">协议 v' + info.version + '　·　上次保存：' + fmtTime(info.ts) + '　·　存档键：<code>' + SAVE_KEY + '</code></p>';
+  }
+
+  function renderPreStatus() {
+    var raw = lsGet(PRE_MULTI_BACKUP_KEY);
+    var info = summarize(raw);
+    var available = !!(raw && info.ok);
+    $('btn-download-pre').disabled = !available;
+    $('btn-restore-pre').disabled = !available;
+    $('btn-delete-pre').disabled = !raw;
+    $('pre-status').innerHTML = available
+      ? '已永久保留迁移前原档：协议 v' + info.version + '，地图 ' + info.mapSize + '×' + info.mapSize + '，保存于 ' + fmtTime(info.ts) + '。自动保存、新游戏和清除当前存档都不会删除它。'
+      : '<span class="note">本机没有迁移前永久原档。</span>';
+  }
+
+  function setMsg(id, text, cls) {
+    var el = $(id);
+    el.textContent = text;
+    el.className = 'msg ' + (cls || '');
+  }
+
+  $('btn-export').addEventListener('click', function () {
+    setMsg('export-msg', '');
+    var container;
+    try {
+      container = exportContainer($('opt-bak').checked, $('opt-ui').checked, $('opt-pre').checked);
+    } catch (e) {
+      setMsg('export-msg', '❌ ' + e.message, 'err');
+      renderStatus();
+      return;
+    }
+    var blob = new Blob([JSON.stringify(container, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'web1800-save-backup.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+    var info = summarize(container.keys[SAVE_KEY]);
+    setMsg('export-msg', '✅ 已导出（建筑 ' + info.buildings + ' / 人口 ' + info.population + '）。把下载的 .json 文件发给新设备。', 'ok');
+  });
+
+  $('file-input').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      setMsg('import-msg', '');
+      var container;
+      try {
+        container = JSON.parse(reader.result);
+      } catch (e) {
+        setMsg('import-msg', '❌ 文件不是有效的 JSON', 'err');
+        return;
+      }
+      try {
+        var res = applyImport(container);
+        var s = res.summary;
+        var extras = Math.max(0, res.importedKeys.length - 1);
+        var txt = '✅ 导入成功！建筑 ' + s.buildings + ' / 人口 ' + s.population + (extras ? '（另含 ' + extras + ' 项备份/布局偏好）' : '');
+        if (res.skippedKeys.length) txt += '\n已保留本机保护键：' + res.skippedKeys.join('、');
+        txt += '\n现在打开游戏页面即可继续游玩。';
+        setMsg('import-msg', txt, 'ok');
+        renderStatus();
+        renderPreStatus();
+      } catch (e) {
+        setMsg('import-msg', '❌ ' + e.message, 'err');
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  function downloadRaw(raw, filename) {
+    var blob = new Blob([raw], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    var href = a.href;
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(href); }, 2000);
+  }
+
+  $('btn-download-pre').addEventListener('click', function () {
+    var raw = lsGet(PRE_MULTI_BACKUP_KEY);
+    if (!raw) return setMsg('pre-msg', '❌ 没有迁移前原档', 'err');
+    downloadRaw(raw, 'web1800-pre-multi-island-save.json');
+    setMsg('pre-msg', '✅ 已下载未经修改的迁移前原档。', 'ok');
+  });
+
+  $('btn-restore-pre').addEventListener('click', function () {
+    if (!confirm('恢复会先把当前主存档写入 .bak，再将迁移前原档设为当前主档。继续吗？')) return;
+    try {
+      Save.restorePreMigrationBackup();
+      setMsg('pre-msg', '✅ 已恢复原档；当前多岛主档已保存在 .bak。打开当前版本游戏时会再次执行受保护迁移。', 'ok');
+      renderStatus();
+    } catch (e) { setMsg('pre-msg', '❌ ' + e.message, 'err'); }
+  });
+
+  $('btn-delete-pre').addEventListener('click', function () {
+    if (!confirm('永久删除后无法自动找回迁移前原档。确定删除吗？')) return;
+    if (Save.deletePreMigrationBackup()) {
+      setMsg('pre-msg', '✅ 已永久删除迁移前原档。', 'ok');
+      renderPreStatus();
+    } else setMsg('pre-msg', '❌ 浏览器拒绝删除本地原档。', 'err');
+  });
+
+  // file:// 检测提示
+  if (location.protocol === 'file:') {
+    var warn = document.createElement('div');
+    warn.style.cssText = 'background:#3a241f;border:1px solid #e06c5f;color:#f0b0a8;border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:16px';
+    warn.textContent = '⚠️ 你正通过 file:// 打开本页。浏览器在 file:// 下不提供稳定的本地存档空间，存档迁移请通过 http:// 或 https:// 访问（与游戏同一网址域名）。';
+    document.querySelector('main').insertBefore(warn, document.querySelector('main').firstChild);
+  }
+
+  renderStatus();
+  renderPreStatus();
+  // 测试钩子(独立工具页,非游戏本体)
+  window.SaveTransfer = {
+    SAVE_KEY: SAVE_KEY,
+    BAK_KEY: BAK_KEY,
+    PRE_MULTI_BACKUP_KEY: PRE_MULTI_BACKUP_KEY,
+    summarize: summarize,
+    exportContainer: exportContainer,
+    applyImport: applyImport,
+    renderPreStatus: renderPreStatus,
+  };
+})();
+</script>
+</body>
+</html>

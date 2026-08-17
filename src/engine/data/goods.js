@@ -7,6 +7,8 @@
   const GOODS = {
     // [修订⑤ 顺序8] 原木(原料,原木厂产)与木材(建材,木板厂产)分离
     log: { name: '原木', icon: '🪵', cat: 'raw' },
+    // [B-63] 船帆(原料,制帆厂产;通用帆船订单消耗)[MI-08]
+    sail: { name: '船帆', icon: '⛵', cat: 'raw' },
     fish: { name: '鱼', icon: '🐟', cat: 'basic' },
     wood: { name: '木材', icon: '🪵', cat: 'material' },
     potato: { name: '土豆', icon: '🥔', cat: 'raw' },

@@ -57,10 +57,16 @@
   // [V1.10 修订] 服务生效 = 路距离:从服务建筑相邻道路出发,沿道路延伸 radius 格;
   // 住宅 footprint 接触被覆盖道路(自身或 4 邻)即被服务(原版机制,用户确认)
   function serviceRoads(state, type) {
+    // [优化] 布局版本缓存:道路/服务建筑布局不变则复用覆盖结果(每 tick 被查询,避免重复全岛 BFS)
+    // 失效键 = 岛级 _layoutVer(placement 双写递增)+ 服务类型 + 服务建筑 id+radius(radius 被测试/未来平衡临时修改时也须失效)
     const services = Object.values(state.buildings).filter((b) => {
       const def = getDef(b.type);
-      return def && def.service && def.service.type === type && computeStatus(state, b).status !== 'disconnected';
+      return def && def.service && def.service.type === type;
     });
+    const svcKey = services.map((svc) => svc.id + ':' + (getDef(svc.type).service.radius || 0)).join(',');
+    const ver = (state._layoutVer || 0) + ':' + type + ':' + svcKey;
+    const cache = state._serviceCache || (state._serviceCache = {});
+    if (cache[ver] instanceof Set) return cache[ver]; // [修复] 类型防御:读档异常残留的数组缓存不命中
     const covered = new Set();
     const size = state.map.size;
     for (const svc of services) {
@@ -99,6 +105,9 @@
         }
       }
     }
+    // [优化] 写入缓存(容量防御:布局频繁变化时防累积)
+    if (Object.keys(cache).length > 60) state._serviceCache = {};
+    else cache[ver] = covered;
     return covered;
   }
 

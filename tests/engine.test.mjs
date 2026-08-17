@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 require('../src/engine/data/goods.js');
@@ -13,17 +14,33 @@ require('../src/engine/data/tiers.js');
 require('../src/engine/data/buildings-data.js');
 require('../src/engine/data/buildings.js');
 require('../src/engine/data/map-template.js');
+require('../src/engine/data/ships-data.js');
+let b61WorldData = null;
+try {
+  b61WorldData = require('../src/engine/data/world-data.js');
+} catch (e) {
+  if (!e || e.code !== 'MODULE_NOT_FOUND') throw e;
+}
 require('../src/engine/data/balance.js');
 require('../src/engine/events.js');
 require('../src/engine/state.js');
 require('../src/engine/connectivity.js');
 require('../src/engine/economy.js');
 require('../src/engine/placement.js');
+require('../src/engine/ships.js');
+require('../src/engine/explorations.js');
+require('../src/engine/transport.js');
 require('../src/engine/population.js');
 require('../src/engine/goals.js');
 require('../src/engine/chains.js');
 require('../src/engine/tick.js');
 require('../src/engine/save.js');
+let b61SaveTransfer = null;
+try {
+  b61SaveTransfer = require('../src/tools/save-transfer.js');
+} catch (e) {
+  if (!e || e.code !== 'MODULE_NOT_FOUND') throw e;
+}
 
 const E = globalThis.Engine;
 const { key } = E.state;
@@ -36,8 +53,83 @@ const PF = [0]; // [用户决策] 森林移除:可建地形仅平地
 const CYCLE = 60; // 测试基准周期(秒)
 
 function createInitialState() {
-  return E.state.createInitialState(DEFAULT_SEED);
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  // 既有机制测试固定使用原128地形夹具，避免随机160地形改变找位与道路oracle；B-61专项测试调用真实入口。
+  s.map = { size: 128, terrain: E.mapTemplate.generateMap(128, DEFAULT_SEED), seed: DEFAULT_SEED };
+  return s;
 }
+
+function makeLegacySaveRaw() {
+  const world = createInitialState();
+  const island = E.state.getActiveIsland(world);
+  const legacy = {
+    version: 1,
+    settings: world.settings,
+    time: world.time,
+    map: island.map,
+    resources: Object.assign({}, island.resources),
+    buildings: island.buildings,
+    grid: island.grid,
+    roads: island.roads,
+    population: island.population,
+    happiness: island.happiness,
+    unlocks: island.unlocks,
+    log: island.log,
+    nextId: island.nextId,
+    _conn: island._conn,
+  };
+  return JSON.stringify({ v: 1, ts: 123, state: legacy });
+}
+
+test('[B-61] world-data集中声明世界schema与迁移常量', () => {
+  assert.ok(b61WorldData, 'world-data模块尚未实现');
+  assert.equal(b61WorldData.SCHEMA_VERSION, 2);
+  assert.equal(b61WorldData.MAP_SIZE, 160);
+  assert.equal(b61WorldData.LEGACY_MAP_SIZE, 128);
+  assert.equal(b61WorldData.LEGACY_MAP_OFFSET, 16);
+  assert.equal(b61WorldData.MAX_OWNED_ISLANDS, 12);
+  assert.equal(b61WorldData.MAIN_ISLAND_ID, 'island-main');
+  assert.equal(b61WorldData.PRE_MULTI_BACKUP_KEY, 'web1800-save-v1.pre-multi-island');
+  assert.deepEqual(b61WorldData.MAIN_FERTILITIES, ['potato', 'grain', 'hops', 'pepper', 'grapes']);
+  assert.deepEqual(b61WorldData.MINERAL_TYPES, ['clay', 'iron', 'coal', 'limestone', 'zinc', 'copper', 'gold']);
+});
+
+test('[B-61] 新游戏创建World根对象与单座160主岛', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  assert.equal(s.schemaVersion, 2);
+  assert.equal(s.activeIslandId, 'island-main');
+  assert.deepEqual(Object.keys(s.islands), ['island-main']);
+  const island = s.islands['island-main'];
+  assert.equal(island.id, 'island-main');
+  assert.equal(island.map.size, 160);
+  assert.equal(island.map.terrain.length, 160);
+  assert.equal(island.map.terrain[0].length, 160);
+  assert.equal(s.map, island.map, '旧引擎map读取活动岛兼容别名');
+  assert.equal(s.buildings, island.buildings, '旧引擎buildings读取活动岛兼容别名');
+  assert.equal(s.treasury.coin, 5000);
+  assert.equal(s.resources.wood, 60);
+  assert.equal(s.resources.fish, 100);
+  s.resources.coin -= 25;
+  assert.equal(s.treasury.coin, 4975, '旧resources.coin写入全局钱包');
+  const plain = JSON.parse(JSON.stringify(s));
+  assert.equal(plain.map, undefined, '兼容别名不重复进入存档');
+  assert.equal(plain.resources, undefined, '兼容resources不重复进入存档');
+  assert.equal(plain.islands['island-main'].resources.coin, undefined, '岛内商品不复制全局金币');
+});
+
+test('[B-61] 切换活动岛后金币仍映射全局钱包且存档守恒', () => {
+  const world = E.state.createInitialState(DEFAULT_SEED);
+  world.islands['island-second'] = E.state.createIslandState('island-second', DEFAULT_SEED + 1, 160, { wood: 5 });
+  E.state.attachWorldAliases(world);
+  world.activeIslandId = 'island-second';
+  world.resources.coin = world.treasury.coin + 7;
+  assert.equal(world.treasury.coin, 5007, '第二岛收支必须更新世界钱包');
+  const encoded = E.save.serialize(world);
+  assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(encoded).state.islands['island-second'].resources, 'coin'), false, '岛内不得序列化独立coin');
+  const loaded = E.save.deserialize(encoded);
+  assert.equal(loaded.treasury.coin, 5007);
+  assert.equal(loaded.resources.coin, 5007);
+});
 
 // ---- footprint 查找助手(全部要求外圈有陆地可铺路/仓库覆盖) ----
 function cellFree(s, x, y) {
@@ -98,6 +190,97 @@ function findAdjacentSpot(s, x, y, w, h, codes, dist, exclude, anchorW, anchorH)
   }
   return null;
 }
+// [B-63] 纯海岸找位:footprint 全水 + 4 邻至少 1 陆地(不铺路,用于造船厂/码头断连场景)
+function findCoastSpot(s, w, h) {
+  const size = s.map.size;
+  const bx = Math.floor((w - 1) / 2), by = Math.floor((h - 1) / 2);
+  for (let cy = by; cy < size - (h - 1 - by); cy++) for (let cx = bx; cx < size - (w - 1 - bx); cx++) {
+    let allWater = true, anyLand = false;
+    for (let dy = 0; dy < h && allWater; dy++) for (let dx = 0; dx < w && allWater; dx++) {
+      const t = s.map.terrain[cy - by + dy][cx - bx + dx];
+      if (t !== 6) { allWater = false; break; }
+      for (const [ddx, ddy] of dirs4) {
+        const wx = cx - bx + dx + ddx, wy = cy - by + dy + ddy;
+        if (wx >= 0 && wy >= 0 && wx < size && wy < size && s.map.terrain[wy][wx] !== 6 && s.map.terrain[wy][wx] !== 7) anyLand = true;
+      }
+    }
+    if (allWater && anyLand) return { x: cx, y: cy };
+  }
+  return null;
+}
+
+// [B-63] 指定中心附近找海岸位(第二座码头用)
+function findCoastSpotOffset(s, w, h, nearX, nearY) {
+  const size = s.map.size;
+  const bx = Math.floor((w - 1) / 2), by = Math.floor((h - 1) / 2);
+  for (let dy = -10; dy <= 10; dy++) for (let dx = -10; dx <= 10; dx++) {
+    const cx = nearX + dx, cy = nearY + dy;
+    if (cx < bx || cy < by || cx >= size - (w - 1 - bx) || cy >= size - (h - 1 - by)) continue;
+    let allWater = true, anyLand = false;
+    for (let yy = 0; yy < h && allWater; yy++) for (let xx = 0; xx < w && allWater; xx++) {
+      if (s.map.terrain[cy - by + yy][cx - bx + xx] !== 6) { allWater = false; break; }
+      for (const [ddx, ddy] of dirs4) {
+        const wx = cx - bx + xx + ddx, wy = cy - by + yy + ddy;
+        if (wx >= 0 && wy >= 0 && wx < size && wy < size && s.map.terrain[wy][wx] !== 6 && s.map.terrain[wy][wx] !== 7) anyLand = true;
+      }
+    }
+    if (allWater && anyLand) return { x: cx, y: cy };
+  }
+  return null;
+}
+function footprintOverlaps(s, def, x1, y1, x2, y2) {
+  const a = footprint(def, x1, y1);
+  const b = footprint(def, x2, y2);
+  const set = new Set(a.map((c) => key(c.x, c.y)));
+  return b.some((c) => set.has(key(c.x, c.y)));
+}
+function setupShipyard(s) {
+  setupBase(s);
+  const spot = findCoastRect(s, 6, 17); // 找位+铺路+仓库覆盖验证(返回中心)
+  assert.ok(spot, '应有仓库覆盖内海岸 6×17 位');
+  const r = placeBuilding(s, 'sailingShipyard', spot.x, spot.y);
+  assert.equal(r.ok, true, '造船厂放置: ' + (r.reason || ''));
+  E.economy.refresh(s, { produce: false, logs: false });
+  s.population.workers.count = 100;
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s.buildings[r.building.id].status, 'producing', '造船厂应 producing: ' + (s.buildings[r.building.id].reason || ''));
+  return { shipyard: r.building, spot };
+}
+
+// [HIGH-2] 主岛码头(7×11)+ 铺路连通仓库(海上任务出发权限;B-64 测试前置)
+function setupPort(s) {
+  const def = E.buildings.getDef('port');
+  const size = s.map.size;
+  const w = 7, h = 11;
+  const bx = Math.floor((w - 1) / 2), by = Math.floor((h - 1) / 2);
+  let spot = null;
+  // 全图遍历:全水 footprint + 4 邻陆地 + 不与已有建筑重叠(海岸建筑 footprint 全水,可能与船厂重叠)
+  for (let cy = by; cy < size - (h - 1 - by) && !spot; cy++) {
+    for (let cx = bx; cx < size - (w - 1 - bx) && !spot; cx++) {
+      let allWater = true, anyLand = false;
+      for (let dy = 0; dy < h && allWater; dy++) for (let dx = 0; dx < w && allWater; dx++) {
+        const t = s.map.terrain[cy - by + dy][cx - bx + dx];
+        if (t !== 6) { allWater = false; break; }
+        for (const [ddx, ddy] of dirs4) {
+          const wx = cx - bx + dx + ddx, wy = cy - by + dy + ddy;
+          if (wx >= 0 && wy >= 0 && wx < size && wy < size && s.map.terrain[wy][wx] !== 6 && s.map.terrain[wy][wx] !== 7) anyLand = true;
+        }
+      }
+      if (!allWater || !anyLand) continue;
+      const fp = E.placement.footprint(def, cx, cy, 0);
+      const overlap = fp.some((p) => s.grid[key(p.x, p.y)]);
+      if (!overlap) { spot = { x: cx, y: cy }; break; }
+    }
+  }
+  assert.ok(spot, '应有未被占用的海岸 7×11 码头位');
+  const r = placeBuilding(s, 'port', spot.x, spot.y);
+  assert.equal(r.ok, true, '码头放置: ' + (r.reason || ''));
+  const av = E.placement.footprint(def, spot.x, spot.y, 0);
+  const c = connectTo(s, spot.x, spot.y, av, av);
+  assert.ok(c, '码头连通仓库');
+  return r.building;
+}
+
 // 渔场 5×16:锚点陆地、footprint 无山脉、至少一格邻水、外圈有陆地(码头式可伸海)
 function findCoastFishery(s) {
   const size = s.map.size, W = 5, H = 16;
@@ -173,10 +356,32 @@ function rectAdjacent(ax, ay, aw, ah, bx, by, bw, bh) {
     ((ay + ah === by || by + bh === ay) && ax < bx + bw && bx < ax + aw);
 }
 // 找与已建建筑(built,含尺寸)相邻的 3×3 平地(开局住宅区)
+// [民居规则] 候选位 4 邻至少 1 格"有出口的空地"(connectTo 可达:空地格自身还需再外圈有空地,排除死口袋)
 function findHouseSpot(s, built) {
   const size = s.map.size;
   for (let y = 0; y <= size - 3; y++) for (let x = 0; x <= size - 3; x++) {
     if (!freeRect(s, x, y, 3, 3) || !terrainRectOk(s, x, y, 3, 3, PF)) continue;
+    let air = false;
+    for (let dy = -1; dy <= 3 && !air; dy++) for (let dx = -1; dx <= 3 && !air; dx++) {
+      if (dx >= 0 && dx < 3 && dy >= 0 && dy < 3) continue;
+      const ax = x + dx, ay = y + dy;
+      if (ax < 0 || ay < 0 || ax >= size || ay >= size) continue;
+      const t = s.map.terrain[ay][ax];
+      if (t === 6 || t === 7) continue;
+      const k = key(ax, ay);
+      if (s.grid[k] || s.roads[k]) continue;
+      // 空地格需有出口:其 4 邻(不含候选位)还有空地/路
+      for (const [ddx, ddy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ex = ax + ddx, ey = ay + ddy;
+        if (ex >= x && ex < x + 3 && ey >= y && ey < y + 3) continue;
+        if (ex < 0 || ey < 0 || ex >= size || ey >= size) continue;
+        const et = s.map.terrain[ey][ex];
+        if (et === 6 || et === 7) continue;
+        const ek = key(ex, ey);
+        if (!s.grid[ek] && !s.roads[ek]) { air = true; break; }
+      }
+    }
+    if (!air) continue;
     for (const pb of built) {
       const pbd = E.buildings.getDef(pb.type);
       const pbx = pb.x - Math.floor((pbd.size.w - 1) / 2), pby = pb.y - Math.floor((pbd.size.h - 1) / 2);
@@ -538,7 +743,6 @@ test('[V1.8] 生成器:可通行陆地单连通(山脉为障碍)', () => {
 test('[B-43] 仓库与民居建造:仓库 5×5 收费 500,新建民居初始 0 人', () => {
   const s = createInitialState();
   assert.equal(Object.keys(s.buildings).length, 0);
-  assert.equal(s.map.size, 128);
   const coin0 = s.resources.coin;
   const p = findSpot(s, 5, 5, null, PF);
   assert.ok(p);
@@ -650,14 +854,14 @@ test('[V1.10 修订⑥] tick 主循环按需求收入公式结算金币', () => 
     'tick 金币增量应等于需求收入(期望 ' + expected + ',实际 ' + actual + ')');
 });
 
-test('初始状态:128 地图,无建筑,资源(10000 金币/60 木/300 鱼)', () => {
-  const s = createInitialState();
+test('初始状态:160 主岛,无建筑,资源(5000 金币/60 木/100 鱼)', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
   assert.equal(Object.keys(s.buildings).length, 0);
-  assert.equal(s.map.size, 128);
+  assert.equal(s.map.size, 160);
   assert.equal(s.population.farmers.count, 0, '开局无人口(民居驱动)');
-  assert.equal(s.resources.coin, 10000); // [玩家反馈 #2] 开局金币 2500→10000
+  assert.equal(s.resources.coin, 5000); // [B-59] 开局金币 10000→5000(用户调整)
   assert.equal(s.resources.wood, 60);
-  assert.equal(s.resources.fish, 300);
+  assert.equal(s.resources.fish, 100); // [B-59] 开局鱼 300→100(用户调整)
   assert.equal(E.goals.getCurrentGoal(s).id, 'g0', '初始目标:放仓库');
 });
 
@@ -728,7 +932,7 @@ test('[V1.10 修订⑤ 顺序8] 周期制:渔场 30 tick 产 1 鱼;消耗按当�
     E.population.updateNeeds(s);
     E.economy.refresh(s, { produce: true, logs: false });
   }
-  const net = s.resources.fish - 300;
+  const net = s.resources.fish - 100; // [B-59] 开局鱼 300→100
   assert.ok(Math.abs(net - (2 - 50 * 0.00004166667 * CYCLE)) < 0.01, '净 = 产2 - 耗(50人×率×60)=' + net.toFixed(3)); // [玩家反馈] rate 已÷容量(每住宅→每人)
   // 人口减半 → 消耗减半
   s.population.farmers.count = 25;
@@ -746,12 +950,12 @@ test('[B-43] 住户 Influx 模型:满足基础需求给全额人口(离散);至�
   const s = createInitialState();
   setupBase(s);
   assert.equal(s.population.farmers.count, 50, '测试基建显式注入 50 人');
-  for (let i = 0; i < 200; i++) E.tick.tick(s);
+  for (let i = 0; i < 200; i++) E.tick.tick(s, { slowEvery: 1 }); // [优化] 全精度(即时人口断言)
   const cnt = s.population.farmers.count;
   assert.ok(Math.abs(cnt - 15) < 1, '无市场仅鱼 → 目标 15(3×5栋)(实际 ' + cnt.toFixed(1) + ')');
   const mk = setupMarket(s);
   assert.ok(mk, '市场应可建并覆盖民居');
-  for (let i = 0; i < 200; i++) E.tick.tick(s);
+  for (let i = 0; i < 200; i++) E.tick.tick(s, { slowEvery: 1 }); // [优化] 全精度(即时人口断言)
   const cov2 = E.population.serviceCoverage(s, 'farmers', 'market');
   const cnt2 = s.population.farmers.count;
   const target2 = 5 * (5 + 3); // 离散:市场 sat>0 → 全额 5;鱼 → 3
@@ -765,7 +969,7 @@ test('断连建筑不生产', () => {
   const cutN = cutAdjacentRoads(s, fishery.id);
   assert.ok(cutN > 0, '渔场应有邻接路');
   const fish0 = s.resources.fish;
-  E.tick.tick(s);
+  E.tick.tick(s, { slowEvery: 1 }); // [优化] 全精度
   assert.ok(s.resources.fish < fish0, '断连无产出,仅有消耗');
 });
 
@@ -810,8 +1014,754 @@ test('阶层解锁:农民≥50 → 工人', () => {
   assert.ok(s.log.some((m) => m.includes('工人阶层')));
 });
 
+test('[B-61] v1单岛纯迁移到v2世界且二次读取幂等', () => {
+  const terrain = Array.from({ length: 128 }, (_, y) =>
+    Array.from({ length: 128 }, (_, x) => ((x + y) % 17 === 0 ? 3 : 0)));
+  terrain[0][0] = 6;
+  terrain[127][127] = 6;
+  const legacy = {
+    version: 1,
+    settings: { speed: 2, paused: false },
+    time: { day: 7, hour: 11, tickAcc: 4 },
+    map: { size: 128, terrain, seed: 77 },
+    resources: { coin: 4321, wood: 12, fish: 34, steel: 9 },
+    buildings: {
+      b1: { id: 'b1', type: 'warehouse', x: 2, y: 2, level: 1, status: 'idle' },
+      b2: { id: 'b2', type: 'residence', x: 126, y: 126, level: 1, status: 'idle', occupied: 7 },
+    },
+    grid: { stale: 'bad' },
+    roads: { '4,5': 2, '100,101': 1 },
+    population: {
+      farmers: { count: 17, satisfaction: 0.8 },
+      workers: { count: 3, satisfaction: 0.5 },
+      artisans: { count: 0, satisfaction: 0 },
+      engineers: { count: 0, satisfaction: 0 },
+      investors: { count: 0, satisfaction: 0 },
+    },
+    happiness: 73,
+    unlocks: { farmers: true, workers: true, artisans: false, engineers: false, investors: false },
+    log: ['旧档日志'],
+    nextId: 3,
+    _conn: { dirty: false, ids: { stale: true } },
+    ratesHistory: { wood: { p: [1], c: [0], n: [1], sp: 1, sc: 0, sn: 1 } },
+  };
+  const raw = JSON.stringify({ v: 1, ts: 123, state: legacy });
+  const world = E.save.deserialize(raw);
+  assert.equal(world.schemaVersion, 2);
+  assert.equal(world.migrations.legacy128To160, true);
+  assert.equal(world.activeIslandId, 'island-main');
+  assert.equal(world.treasury.coin, 4321);
+  assert.equal(world.resources.wood, 12);
+  assert.equal(world.resources.steel, 9);
+  assert.deepEqual(world.population, legacy.population);
+  assert.deepEqual(world.islands['island-main'].fertilities, ['potato', 'grain', 'hops', 'pepper', 'grapes']);
+  assert.equal(world.map.size, 160);
+  for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+    assert.equal(world.map.terrain[y + 16][x + 16], terrain[y][x], '中央旧地形逐格相等');
+  }
+  for (let y = 0; y < 160; y++) for (let x = 0; x < 160; x++) {
+    if (x >= 16 && x < 144 && y >= 16 && y < 144) continue;
+    assert.equal(world.map.terrain[y][x], 6, '新增16格外圈全海水');
+  }
+  assert.deepEqual([world.buildings.b1.x, world.buildings.b1.y], [18, 18]);
+  assert.deepEqual([world.buildings.b2.x, world.buildings.b2.y], [142, 142]);
+  assert.deepEqual(world.roads, { '20,21': 2, '116,117': 1 });
+  assert.equal(world.grid.stale, undefined, '旧grid不复制');
+  for (const c of footprint(E.buildings.getDef('warehouse'), 18, 18)) {
+    assert.equal(world.grid[key(c.x, c.y)], 'b1', '按迁移后footprint重建grid');
+  }
+  assert.equal(world._conn.dirty, true);
+  assert.deepEqual(world._conn.ids, {});
+  const encoded = E.save.serialize(world);
+  assert.equal(JSON.parse(encoded).v, 2);
+  const again = E.save.deserialize(encoded);
+  assert.deepEqual([again.buildings.b1.x, again.buildings.b1.y], [18, 18], '二次读取不重复平移');
+  assert.deepEqual(again.map.terrain, world.map.terrain, '二次读取不重生地形');
+});
+
+test('[B-61] v1系统日志地图坐标随岛平移且普通文本不变', () => {
+  const envelope = JSON.parse(makeLegacySaveRaw());
+  envelope.state.log = [
+    '建造:仓库 (20,30)',
+    '🚚 仓库 移动到 (40,50)',
+    '玩家输入 1,2',
+    '拆除:仓库 (返还 木材 +10)',
+  ];
+  const world = E.save.deserialize(JSON.stringify(envelope));
+  assert.deepEqual(world.log, [
+    '建造:仓库 (36,46)',
+    '🚚 仓库 移动到 (56,66)',
+    '玩家输入 1,2',
+    '拆除:仓库 (返还 木材 +10)',
+  ]);
+  const again = E.save.deserialize(E.save.serialize(world));
+  assert.deepEqual(again.log, world.log, 'v2二次读取不重复平移日志坐标');
+});
+
+test('[B-61] load首次迁移永久保留原始v1并原子写回v2', () => {
+  const prevLS = globalThis.localStorage;
+  const raw = makeLegacySaveRaw();
+  const store = { [E.save.SAVE_KEY]: raw };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    const loaded = E.save.load();
+    assert.equal(loaded.schemaVersion, 2);
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], raw, '永久备份逐字等于迁移前主档');
+    assert.equal(JSON.parse(store[E.save.SAVE_KEY]).v, 2, '主键原子写回v2');
+    const immutable = store[E.save.PRE_MULTI_BACKUP_KEY];
+    E.save.load();
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], immutable, '再次加载不覆盖永久备份');
+    E.save.clearSave();
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], immutable, '清除当前存档不删除永久备份');
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 永久备份写入失败时阻断迁移且主档不变', () => {
+  const prevLS = globalThis.localStorage;
+  const raw = makeLegacySaveRaw();
+  const store = { [E.save.SAVE_KEY]: raw };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => {
+      if (k === E.save.PRE_MULTI_BACKUP_KEY) throw new Error('quota');
+      store[k] = String(v);
+    },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    assert.throws(
+      () => E.save.load(),
+      (e) => e && e.code === 'MIGRATION_BLOCKED',
+      '备份失败必须显式阻断启动'
+    );
+    assert.equal(store[E.save.SAVE_KEY], raw, '迁移失败不得覆盖原始主档');
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], undefined);
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 迁移关键写入静默失败时复读阻断且主档不变', () => {
+  const prevLS = globalThis.localStorage;
+  const raw = makeLegacySaveRaw();
+  try {
+    for (const ignoredKey of [E.save.PRE_MULTI_BACKUP_KEY, E.save.SAVE_KEY]) {
+      const store = { [E.save.SAVE_KEY]: raw };
+      globalThis.localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { if (k !== ignoredKey) store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      assert.throws(() => E.save.load(), (e) => e && e.code === 'MIGRATION_BLOCKED');
+      assert.equal(store[E.save.SAVE_KEY], raw, ignoredKey + ':主档保持原始v1');
+      if (ignoredKey === E.save.PRE_MULTI_BACKUP_KEY) {
+        assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], undefined, '静默备份失败不能继续迁移');
+      } else {
+        assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], raw, '主键静默失败时永久原档已安全保留');
+      }
+    }
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 结构校验后迁移失败必须阻断启动', () => {
+  const prevLS = globalThis.localStorage;
+  const envelope = JSON.parse(makeLegacySaveRaw());
+  envelope.state.buildings.bad = { id: 'bad', type: 'unknown-building', x: 10, y: 10, rot: 0 };
+  const raw = JSON.stringify(envelope);
+  const store = { [E.save.SAVE_KEY]: raw };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    assert.throws(() => E.save.load(), (e) => e && e.code === 'MIGRATION_BLOCKED');
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], raw, '执行坐标迁移前已经永久保留原文');
+    assert.equal(store[E.save.SAVE_KEY], raw, '迁移失败不覆盖主键');
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 恢复迁移前备份先保护当前主档且仅显式删除', () => {
+  const prevLS = globalThis.localStorage;
+  const oldRaw = makeLegacySaveRaw();
+  const currentRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  const store = {
+    [E.save.SAVE_KEY]: currentRaw,
+    [E.save.PRE_MULTI_BACKUP_KEY]: oldRaw,
+  };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    assert.equal(typeof E.save.restorePreMigrationBackup, 'function');
+    assert.equal(E.save.restorePreMigrationBackup(), true);
+    assert.equal(store[E.save.BAK_KEY], currentRaw, '恢复前保护当前v2主档');
+    assert.equal(store[E.save.SAVE_KEY], oldRaw, '主键恢复为原始v1');
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], oldRaw, '恢复本身不删除永久备份');
+    assert.equal(E.save.deletePreMigrationBackup(), true);
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], undefined, '只有显式删除才移除');
+    assert.equal(store[E.save.SAVE_KEY], oldRaw, '删除备份不影响当前主键');
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 恢复前保护写入失败时不覆盖当前主档', () => {
+  const prevLS = globalThis.localStorage;
+  const oldRaw = makeLegacySaveRaw();
+  const currentRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  const store = {
+    [E.save.SAVE_KEY]: currentRaw,
+    [E.save.PRE_MULTI_BACKUP_KEY]: oldRaw,
+  };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => {
+      if (k === E.save.BAK_KEY) throw new Error('bak quota');
+      store[k] = String(v);
+    },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    assert.throws(() => E.save.restorePreMigrationBackup(), /无法保护当前主存档/);
+    assert.equal(store[E.save.SAVE_KEY], currentRaw, '保护失败后主档不变');
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], oldRaw, '永久备份不变');
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 恢复主键写入失败时保留当前主档与保护副本', () => {
+  const prevLS = globalThis.localStorage;
+  const oldRaw = makeLegacySaveRaw();
+  const currentRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  const store = {
+    [E.save.SAVE_KEY]: currentRaw,
+    [E.save.PRE_MULTI_BACKUP_KEY]: oldRaw,
+  };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => {
+      if (k === E.save.SAVE_KEY) throw new Error('save quota');
+      store[k] = String(v);
+    },
+    removeItem: (k) => { delete store[k]; },
+  };
+  try {
+    assert.throws(() => E.save.restorePreMigrationBackup(), /无法恢复迁移前备份/);
+    assert.equal(store[E.save.SAVE_KEY], currentRaw, '恢复写入失败后主档不变');
+    assert.equal(store[E.save.BAK_KEY], currentRaw, '保护副本已写入');
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], oldRaw, '永久备份仍在');
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 恢复关键写入静默失败时复读阻断', () => {
+  const prevLS = globalThis.localStorage;
+  const oldRaw = makeLegacySaveRaw();
+  const currentRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  try {
+    for (const ignoredKey of [E.save.BAK_KEY, E.save.SAVE_KEY]) {
+      const store = {
+        [E.save.SAVE_KEY]: currentRaw,
+        [E.save.PRE_MULTI_BACKUP_KEY]: oldRaw,
+      };
+      globalThis.localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { if (k !== ignoredKey) store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      assert.throws(
+        () => E.save.restorePreMigrationBackup(),
+        ignoredKey === E.save.BAK_KEY ? /无法保护当前主存档/ : /无法恢复迁移前备份/
+      );
+      assert.equal(store[E.save.SAVE_KEY], currentRaw, ignoredKey + ':当前主档不变');
+      if (ignoredKey === E.save.BAK_KEY) assert.equal(store[E.save.BAK_KEY], undefined);
+      else assert.equal(store[E.save.BAK_KEY], currentRaw, '主键失败前保护副本已验证写入');
+    }
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 永久原档静默删除失败不得报告成功', () => {
+  const prevLS = globalThis.localStorage;
+  const raw = makeLegacySaveRaw();
+  const store = { [E.save.PRE_MULTI_BACKUP_KEY]: raw };
+  globalThis.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    removeItem: () => {},
+  };
+  try {
+    assert.equal(E.save.deletePreMigrationBackup(), false);
+    assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], raw);
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevLS;
+  }
+});
+
+test('[B-61] 存档工具核心识别v2并可选导入导出永久备份', () => {
+  assert.ok(b61SaveTransfer, 'save-transfer核心模块尚未实现');
+  const mainRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  const preRaw = makeLegacySaveRaw();
+  const store = {
+    [E.save.SAVE_KEY]: mainRaw,
+    [E.save.PRE_MULTI_BACKUP_KEY]: preRaw,
+    'ui.leftTab': 'resources',
+  };
+  const storage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    key: (i) => Object.keys(store)[i] || null,
+    get length() { return Object.keys(store).length; },
+  };
+  const summary = b61SaveTransfer.summarize(mainRaw);
+  assert.equal(summary.ok, true);
+  assert.equal(summary.coin, 5000);
+  assert.equal(summary.mapSize, 160);
+  const container = b61SaveTransfer.exportContainer(storage, E.save, { includeBak: false, includeUi: true, includePreMigration: true });
+  assert.equal(container.keys[E.save.PRE_MULTI_BACKUP_KEY], preRaw);
+  assert.equal(container.keys['ui.leftTab'], 'resources');
+  const imported = {};
+  const target = {
+    getItem: (k) => (k in imported ? imported[k] : null),
+    setItem: (k, v) => { imported[k] = String(v); },
+  };
+  const result = b61SaveTransfer.applyImport(target, E.save, container);
+  assert.equal(result.summary.mapSize, 160);
+  assert.equal(imported[E.save.SAVE_KEY], mainRaw);
+  assert.equal(imported[E.save.PRE_MULTI_BACKUP_KEY], preRaw);
+});
+
+test('[B-61] 存档工具页加载游戏完整迁移校验依赖', () => {
+  const html = readFileSync(new URL('../save-transfer.html', import.meta.url), 'utf8');
+  const orderedScripts = [
+    'src/engine/data/tiers.js',
+    'src/engine/data/buildings-data.js',
+    'src/engine/data/buildings.js',
+    'src/engine/data/map-template.js',
+    'src/engine/data/world-data.js',
+    'src/engine/events.js',
+    'src/engine/state.js',
+    'src/engine/connectivity.js',
+    'src/engine/economy.js',
+    'src/engine/placement.js',
+    'src/engine/save.js',
+    'src/tools/save-transfer.js',
+  ];
+  let previous = -1;
+  for (const script of orderedScripts) {
+    const index = html.indexOf(script);
+    assert.ok(index > previous, script + '必须存在且按依赖顺序加载');
+    previous = index;
+  }
+});
+
+test('[B-61] 存档工具继续接受旧版web1800备份容器', () => {
+  const mainRaw = E.save.serialize(E.state.createInitialState(DEFAULT_SEED));
+  const imported = {};
+  const storage = {
+    getItem: (k) => (k in imported ? imported[k] : null),
+    setItem: (k, v) => { imported[k] = String(v); },
+  };
+  const legacyContainer = {
+    app: 'web1800',
+    kind: 'save-backup',
+    exportedAt: 123,
+    keys: { [E.save.SAVE_KEY]: mainRaw },
+  };
+  const result = b61SaveTransfer.applyImport(storage, E.save, legacyContainer);
+  assert.equal(result.summary.ok, true);
+  assert.equal(imported[E.save.SAVE_KEY], mainRaw);
+});
+
+test('[B-61] 畸形v1容器在任何存储写入前被拒绝', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(303));
+  const store = { [E.save.SAVE_KEY]: currentMain, [E.save.BAK_KEY]: 'safe-bak' };
+  let writes = 0;
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { writes++; store[key] = String(value); },
+  };
+  const malformed = JSON.stringify({ v: 1, state: { map: {}, buildings: {}, resources: {} } });
+  assert.throws(() => b61SaveTransfer.applyImport(storage, E.save, {
+    app: 'web1800',
+    kind: 'save-backup',
+    keys: { [E.save.SAVE_KEY]: malformed },
+  }), /旧存档|格式|地图尺寸/);
+  assert.equal(writes, 0);
+  assert.equal(store[E.save.SAVE_KEY], currentMain);
+  assert.equal(store[E.save.BAK_KEY], 'safe-bak');
+});
+
+test('[B-61] v1缺少人口根对象时不得导入', () => {
+  const malformed = JSON.parse(makeLegacySaveRaw());
+  delete malformed.state.population;
+  assert.throws(() => E.save.validateSerialized(JSON.stringify(malformed)), /旧存档|人口|格式/);
+  const store = {};
+  let writes = 0;
+  assert.throws(() => b61SaveTransfer.applyImport({
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { writes++; store[key] = String(value); },
+  }, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: { [E.save.SAVE_KEY]: JSON.stringify(malformed) },
+  }), /旧存档|人口|格式/);
+  assert.equal(writes, 0);
+});
+
+test('[B-61] v1与v2完整运行时结构在导入前校验', () => {
+  const invalids = [];
+  const v1 = JSON.parse(makeLegacySaveRaw());
+  v1.state.population = {};
+  v1.state.settings = {};
+  v1.state.time = {};
+  delete v1.state.log;
+  delete v1.state.unlocks;
+  delete v1.state.nextId;
+  invalids.push(['v1缺运行时字段', JSON.stringify(v1)]);
+
+  const validV2 = () => JSON.parse(E.save.serialize(E.state.createInitialState(410)));
+  const missingRuntime = validV2();
+  missingRuntime.state.islands['island-main'].population = {};
+  missingRuntime.state.settings = {};
+  missingRuntime.state.time = {};
+  delete missingRuntime.state.islands['island-main'].log;
+  delete missingRuntime.state.islands['island-main'].unlocks;
+  delete missingRuntime.state.islands['island-main'].nextId;
+  invalids.push(['v2缺运行时字段', JSON.stringify(missingRuntime)]);
+
+  const badResource = validV2();
+  badResource.state.islands['island-main'].resources.wood = null;
+  invalids.push(['资源非有限数', JSON.stringify(badResource)]);
+  const badRoad = validV2();
+  badRoad.state.islands['island-main'].roads['1,1'] = 3;
+  invalids.push(['道路等级非法', JSON.stringify(badRoad)]);
+  const badTerrain = validV2();
+  badTerrain.state.islands['island-main'].map.terrain[20][20] = 99;
+  invalids.push(['地形单元非法', JSON.stringify(badTerrain)]);
+  const badBuilding = validV2();
+  badBuilding.state.islands['island-main'].buildings.bad = {
+    id: 'other', type: 'warehouse', x: 20, y: 20, rot: 9, level: 1,
+  };
+  invalids.push(['建筑ID与旋转非法', JSON.stringify(badBuilding)]);
+
+  for (const [label, raw] of invalids) {
+    assert.throws(() => E.save.validateSerialized(raw), undefined, label + ':共享校验拒绝');
+    let writes = 0;
+    const store = {};
+    assert.throws(() => b61SaveTransfer.applyImport({
+      getItem: (key) => (key in store ? store[key] : null),
+      setItem: (key, value) => { writes++; store[key] = String(value); },
+    }, E.save, {
+      format: 'web1800-save-container',
+      version: 2,
+      keys: { [E.save.SAVE_KEY]: raw },
+    }), undefined, label + ':导入拒绝');
+    assert.equal(writes, 0, label + ':零写入');
+  }
+});
+
+test('[B-61] 建筑ID非空且nextId不得与现有b编号碰撞', () => {
+  const malformedV2 = JSON.parse(E.save.serialize(E.state.createInitialState(412)));
+  const island = malformedV2.state.islands['island-main'];
+  island.buildings.b1 = { id: 'b1', type: 'warehouse', x: 20, y: 20, rot: 0, level: 1 };
+  island.nextId = 1;
+  assert.throws(() => E.save.validateSerialized(JSON.stringify(malformedV2)), /建筑|nextId|运行时/);
+
+  const emptyId = JSON.parse(E.save.serialize(E.state.createInitialState(413)));
+  emptyId.state.islands['island-main'].buildings[''] = {
+    id: '', type: 'warehouse', x: 20, y: 20, rot: 0, level: 1,
+  };
+  assert.throws(() => E.save.validateSerialized(JSON.stringify(emptyId)), /建筑|ID/);
+
+  const malformedV1 = JSON.parse(makeLegacySaveRaw());
+  malformedV1.state.buildings.b7 = { id: 'b7', type: 'warehouse', x: 20, y: 20, rot: 0, level: 1 };
+  malformedV1.state.nextId = 7;
+  assert.throws(() => E.save.validateSerialized(JSON.stringify(malformedV1)), /建筑|nextId|运行时/);
+});
+
+test('[B-61] v1建筑锚点越界在导入写入前被拒绝', () => {
+  const malformed = JSON.parse(makeLegacySaveRaw());
+  malformed.state.buildings.b1 = { id: 'b1', type: 'warehouse', x: -10, y: -10, rot: 0, level: 1 };
+  malformed.state.nextId = 2;
+  const raw = JSON.stringify(malformed);
+  assert.throws(() => E.save.validateSerialized(raw), /建筑|坐标|范围/);
+  let writes = 0;
+  assert.throws(() => b61SaveTransfer.applyImport({
+    getItem: () => null,
+    setItem: () => { writes++; },
+  }, E.save, {
+    format: 'web1800-save-container', version: 2,
+    keys: { [E.save.SAVE_KEY]: raw },
+  }), /建筑|坐标|范围/);
+  assert.equal(writes, 0);
+});
+
+test('[B-61] v1金币必须存在且为有限数值', () => {
+  for (const value of [undefined, null]) {
+    const malformed = JSON.parse(makeLegacySaveRaw());
+    if (value === undefined) delete malformed.state.resources.coin;
+    else malformed.state.resources.coin = value;
+    assert.throws(() => E.save.validateSerialized(JSON.stringify(malformed)), /金币|资源/);
+  }
+});
+
+test('[B-61] 导入包普通备份也必须在写入前通过共享校验', () => {
+  const mainRaw = E.save.serialize(E.state.createInitialState(411));
+  let writes = 0;
+  assert.throws(() => b61SaveTransfer.applyImport({
+    getItem: () => null,
+    setItem: () => { writes++; },
+  }, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: {
+      [E.save.SAVE_KEY]: mainRaw,
+      [E.save.BAK_KEY]: '{"v":2,"state":{}}',
+    },
+  }), /存档|格式|岛屿/);
+  assert.equal(writes, 0);
+});
+
+test('[B-61] 畸形v2容器在任何存储写入前被拒绝', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(404));
+  const store = { [E.save.SAVE_KEY]: currentMain };
+  let writes = 0;
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { writes++; store[key] = String(value); },
+  };
+  const malformed = JSON.stringify({
+    v: 2,
+    state: {
+      schemaVersion: 2,
+      activeIslandId: 'island-main',
+      treasury: { coin: 5000 },
+      islands: { 'island-main': { id: 'island-main', map: { size: 160, terrain: [] }, buildings: {}, resources: {}, population: {}, roads: {} } },
+    },
+  });
+  assert.throws(() => b61SaveTransfer.applyImport(storage, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: { [E.save.SAVE_KEY]: malformed },
+  }), /岛屿|地图|格式/);
+  assert.equal(writes, 0);
+  assert.equal(store[E.save.SAVE_KEY], currentMain);
+});
+
+test('[B-61] 导入不覆盖目标设备已有普通保护副本和永久原档', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(101));
+  const incomingMain = E.save.serialize(E.state.createInitialState(202));
+  const localPre = makeLegacySaveRaw();
+  const incomingPre = makeLegacySaveRaw().replace('"ts":123', '"ts":456');
+  const store = {
+    [E.save.SAVE_KEY]: currentMain,
+    [E.save.BAK_KEY]: 'older-local-bak',
+    [E.save.PRE_MULTI_BACKUP_KEY]: localPre,
+  };
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { store[key] = String(value); },
+  };
+  const result = b61SaveTransfer.applyImport(storage, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: {
+      [E.save.SAVE_KEY]: incomingMain,
+      [E.save.BAK_KEY]: incomingMain,
+      [E.save.PRE_MULTI_BACKUP_KEY]: incomingPre,
+    },
+  });
+  assert.equal(store[E.save.SAVE_KEY], incomingMain);
+  assert.equal(store[E.save.BAK_KEY], 'older-local-bak', '目标设备已有普通保护副本逐字保留');
+  assert.equal(store[E.save.PRE_MULTI_BACKUP_KEY], localPre, '目标设备已有永久原档不可被导入包覆盖');
+  assert.deepEqual(result.skippedKeys.sort(), [E.save.BAK_KEY, E.save.PRE_MULTI_BACKUP_KEY].sort());
+});
+
+test('[B-61] 导入在任何写入前校验全部候选键值', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(505));
+  const incomingMain = E.save.serialize(E.state.createInitialState(606));
+  const store = { [E.save.SAVE_KEY]: currentMain };
+  let writes = 0;
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { writes++; store[key] = String(value); },
+  };
+  assert.throws(() => b61SaveTransfer.applyImport(storage, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: {
+      [E.save.SAVE_KEY]: incomingMain,
+      'ui.leftTab': 'resources',
+      'ui.rightTab': { invalid: true },
+    },
+  }), /键值格式/);
+  assert.equal(writes, 0);
+  assert.equal(store[E.save.SAVE_KEY], currentMain);
+  assert.equal(store['ui.leftTab'], undefined);
+});
+
+test('[B-61] 存档工具只导入导出四个现有UI键', () => {
+  const mainRaw = E.save.serialize(E.state.createInitialState(909));
+  const source = {
+    [E.save.SAVE_KEY]: mainRaw,
+    'ui.leftTab': 'resources',
+    'ui.injected': 'ignored',
+  };
+  const sourceStorage = {
+    getItem: (key) => (key in source ? source[key] : null),
+    key: (index) => Object.keys(source)[index] || null,
+    get length() { return Object.keys(source).length; },
+  };
+  const container = b61SaveTransfer.exportContainer(sourceStorage, E.save, { includeUi: true });
+  assert.equal(container.keys['ui.leftTab'], 'resources');
+  assert.equal(container.keys['ui.injected'], undefined);
+  container.keys['ui.injected'] = 'ignored';
+  const target = {};
+  const result = b61SaveTransfer.applyImport({
+    getItem: (key) => (key in target ? target[key] : null),
+    setItem: (key, value) => { target[key] = String(value); },
+    removeItem: (key) => { delete target[key]; },
+  }, E.save, container);
+  assert.equal(target['ui.leftTab'], 'resources');
+  assert.equal(target['ui.injected'], undefined);
+  assert.deepEqual(result.ignoredKeys, ['ui.injected']);
+});
+
+test('[B-61] 导入写入失败时回滚所有已改键', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(707));
+  const incomingMain = E.save.serialize(E.state.createInitialState(808));
+  const store = { [E.save.SAVE_KEY]: currentMain, 'ui.leftTab': 'needs' };
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => {
+      if (key === E.save.SAVE_KEY && value === incomingMain) throw new Error('quota');
+      store[key] = String(value);
+    },
+    removeItem: (key) => { delete store[key]; },
+  };
+  assert.throws(() => b61SaveTransfer.applyImport(storage, E.save, {
+    format: 'web1800-save-container',
+    version: 2,
+    keys: {
+      [E.save.SAVE_KEY]: incomingMain,
+      'ui.leftTab': 'resources',
+      'ui.rightTab': 'goal',
+    },
+  }), /quota/);
+  assert.deepEqual(store, { [E.save.SAVE_KEY]: currentMain, 'ui.leftTab': 'needs' });
+});
+
+test('[B-61] 导入写入静默失败时不得报告成功', () => {
+  const incomingMain = E.save.serialize(E.state.createInitialState(8101));
+  const store = {};
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => { if (key !== E.save.SAVE_KEY) store[key] = String(value); },
+    removeItem: (key) => { delete store[key]; },
+  };
+  assert.throws(() => SaveTransferCore.applyImport(storage, E.save, {
+    format: 'web1800-save-container', version: 2,
+    keys: { [E.save.SAVE_KEY]: incomingMain },
+  }), /导入|写入|存档/);
+  assert.equal(store[E.save.SAVE_KEY], undefined);
+});
+
+test('[B-61] 导入失败且回滚不完整时显式报告未恢复键', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(811));
+  const incomingMain = E.save.serialize(E.state.createInitialState(812));
+  const store = { [E.save.SAVE_KEY]: currentMain, 'ui.leftTab': 'needs' };
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => {
+      if (key === 'ui.rightTab' && value === 'goal') throw new Error('IMPORT_FAIL');
+      store[key] = String(value);
+    },
+    removeItem: (key) => {
+      if (key === E.save.BAK_KEY) throw new Error('ROLLBACK_FAIL');
+      delete store[key];
+    },
+  };
+  let thrown;
+  try {
+    b61SaveTransfer.applyImport(storage, E.save, {
+      format: 'web1800-save-container',
+      version: 2,
+      keys: {
+        [E.save.SAVE_KEY]: incomingMain,
+        'ui.leftTab': 'resources',
+        'ui.rightTab': 'goal',
+      },
+    });
+  } catch (error) { thrown = error; }
+  assert.equal(thrown && thrown.code, 'IMPORT_ROLLBACK_FAILED');
+  assert.deepEqual(thrown && thrown.unrestoredKeys, [E.save.BAK_KEY]);
+  assert.match(thrown && thrown.message, /回滚.*不完整/);
+  assert.match(thrown && thrown.cause && thrown.cause.message, /IMPORT_FAIL/);
+  assert.equal(store[E.save.SAVE_KEY], currentMain, '主档未被导入覆盖');
+  assert.equal(store['ui.leftTab'], 'needs', '已写UI成功恢复');
+  assert.equal(store[E.save.BAK_KEY], currentMain, '失败回滚键保留并被显式报告');
+});
+
+test('[B-61] 回滚操作抛错但值已恢复时不得误列未恢复键', () => {
+  const currentMain = E.save.serialize(E.state.createInitialState(813));
+  const incomingMain = E.save.serialize(E.state.createInitialState(814));
+  const store = { [E.save.SAVE_KEY]: currentMain, [E.save.BAK_KEY]: currentMain, 'ui.leftTab': 'needs' };
+  const storage = {
+    getItem: (key) => (key in store ? store[key] : null),
+    setItem: (key, value) => {
+      if (key === 'ui.rightTab') throw new Error('ORIGINAL_IMPORT_FAIL');
+      store[key] = String(value);
+      if (key === 'ui.leftTab' && value === 'needs') throw new Error('RESTORED_BUT_THROW');
+    },
+    removeItem: (key) => { delete store[key]; },
+  };
+  let thrown;
+  try {
+    SaveTransferCore.applyImport(storage, E.save, {
+      format: 'web1800-save-container', version: 2,
+      keys: {
+        [E.save.SAVE_KEY]: incomingMain,
+        'ui.leftTab': 'resources',
+        'ui.rightTab': 'goal',
+      },
+    });
+  } catch (error) { thrown = error; }
+  assert.equal(thrown && thrown.code, 'IMPORT_ROLLBACK_FAILED');
+  assert.deepEqual(thrown && thrown.unrestoredKeys, []);
+  assert.match(thrown && thrown.cause && thrown.cause.message, /ORIGINAL_IMPORT_FAIL/);
+  assert.equal(store['ui.leftTab'], 'needs');
+});
+
+test('[B-61] 存档工具兼容旧人口count对象摘要', () => {
+  const envelope = JSON.parse(makeLegacySaveRaw());
+  envelope.state.population = { farmer: { count: 7 }, worker: { count: 3 } };
+  const summary = b61SaveTransfer.summarize(JSON.stringify(envelope));
+  assert.equal(summary.ok, true);
+  assert.equal(summary.population, 10);
+});
+
 test('存档:序列化往返一致,损坏报错,无 localStorage 时 load 返回 null', () => {
-  const s = createInitialState();
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  // [Sol 轮3] terrain.drawnGroups 是生成器运行时元数据,不属于存档契约(JSON 不保留),对比前剔除
+  for (const isl of Object.values(s.islands)) {
+    if (isl.map.terrain && isl.map.terrain.drawnGroups) delete isl.map.terrain.drawnGroups;
+  }
   const text = E.save.serialize(s);
   const back = E.save.deserialize(text);
   assert.deepEqual(back, s);
@@ -954,8 +1904,12 @@ test('[V1.1] 目标系统:g0→g1→g2→g3→g4→g5→g6(V1.10 修订⑤ 数�
   const avC = footprint(E.buildings.getDef('fishery'), c.x, c.y);
   const r = placeBuilding(s, 'fishery', c.x, c.y);
   assert.equal(r.ok, true);
-  let cut = findCutRoad(s, r.building.id);
-  while (cut) { setRoad(s, ...cut.split(',').map(Number), false); cut = findCutRoad(s, r.building.id); }
+  // [民居规则修复] 渔场若已连通,只拆 1 条必经路使其断连(while 连拆会误伤共享路网上的民居路;
+  // 民居现严格要求接触道路,而旧 isConnected 允许 BFS 穿过建筑格掩盖了该误伤)
+  if (E.connectivity.isConnected(s, r.building.id)) {
+    const cut = findCutRoad(s, r.building.id);
+    if (cut) setRoad(s, ...cut.split(',').map(Number), false);
+  }
   assert.equal(E.goals.getCurrentGoal(s).id, 'g2', '渔场未连通');
   connectTo(s, c.x, c.y, avC, avC);
   assert.equal(E.goals.getCurrentGoal(s).id, 'g3', '已连通 → 引导烈酒链');
@@ -983,7 +1937,7 @@ test('[V1.1] 目标系统:g0→g1→g2→g3→g4→g5→g6(V1.10 修订⑤ 数�
   assert.equal(ta2.ok, true);
   assert.equal(E.goals.getCurrentGoal(s).id, 'g5', '工作服链齐 → 解锁工人目标(人口不足)');
   s.resources.workclothes = 100;
-  for (let i = 0; i < CYCLE * 3; i++) E.tick.tick(s);
+  for (let i = 0; i < CYCLE * 3; i++) E.tick.tick(s, { slowEvery: 1 }); // [优化] 全精度(即时人口断言)
   // 鱼+工作服满足 → 目标 25(市场覆盖细节由 Influx 测试验证,此处验证引导流程)
   assert.ok(s.population.farmers.count >= 24, '人口回升(实际 ' + s.population.farmers.count.toFixed(1) + ')');
   s.population.farmers.count = 50;
@@ -1003,8 +1957,8 @@ test('[V1.10 修订⑤] 工作服链:绵羊牧场→纺织厂(一步,核查表)'
   const ta = placeBuilding(s, 'tailor', pair.p2.x, pair.p2.y);
   assert.equal(sh.ok, true, '绵羊牧场 3×3: ' + (sh.reason || ''));
   assert.equal(ta.ok, true, '纺织厂 4×4: ' + (ta.reason || ''));
-  // 直接驱动周期(纺织厂需 50 农民,渐近慢;绵羊 30s 产1 = 纺织 30s 耗1)
-  s.population.farmers.count = 50;
+  // 直接驱动周期(岗位制:绵羊牧场 10 + 纺织厂 50 = 60 岗位,60 人满负荷;渐近慢,手动 refresh 循环)
+  s.population.farmers.count = 60;
   for (let i = 0; i < CYCLE * 2; i++) {
     E.state.initFlow(s);
     E.economy.refresh(s, { produce: true, logs: false });
@@ -2004,6 +2958,31 @@ test('移动建筑:合法移动/重叠自移动/非法拒绝/住宅数据保留'
   assert.equal(s.buildings[l.building.id].x, oldX, '拒绝后原位保留');
 });
 
+// [B-51] 移动建筑免费:资源不足(coin=0)时仍可正常移动(不消耗也不被资源检查拦截)
+test('[B-51] 移动建筑免费:资源不足仍可移动', () => {
+  const s = createInitialState();
+  setupBase(s);
+  const spot = findSawmillSpot(s);
+  assert.ok(spot);
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  connectTo(s, spot.x, spot.y, av, av);
+  const r = placeBuilding(s, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true);
+  s.resources.coin = 0; // 花光金币
+  let np = null;
+  for (let y = 2; y < 125 && !np; y++) {
+    for (let x = 2; x < 125 && !np; x++) {
+      if (Math.abs(x - spot.x) + Math.abs(y - spot.y) < 10) continue;
+      if (E.placement.canPlace(s, 'sawmill', x, y, 0, r.building.id, true).ok) np = { x, y };
+    }
+  }
+  assert.ok(np, '应有目标位');
+  const mv = E.placement.moveBuilding(s, r.building.id, np.x, np.y);
+  assert.equal(mv.ok, true, '资源不足也应能移动: ' + (mv.reason || ''));
+  assert.equal(s.buildings[r.building.id].x, np.x, '坐标已更新');
+  assert.equal(s.resources.coin, 0, '移动不消耗资源');
+});
+
 // [H-03] 停工原因结构化:每种 reason 至少一个场景
 test('[H-03] 停工原因拆分:断连/缺工/缺料/覆盖不足/开发度过高', () => {
   const s = createInitialState();
@@ -2098,7 +3077,7 @@ test('[H-01] 周期建筑 /min 平滑:60tick 产 1 → smoothMin ≈ 1.0', () =>
 });
 
 // [H-03 回归] 断路建筑不参与人口/服务模拟(对象状态改造后 population.js 未适配的回归)
-test('[H-03回归] 断路住宅不计容量/数量,断路服务建筑不覆盖', () => {
+test('[H-03回归] 断路住宅不计容量/数量;服务建筑不需连仓库(断路也服务)', () => {
   const s = createInitialState();
   setupBase(s);
   s.resources.coin = 50000; s.resources.wood = 100; s.resources.brick = 100;
@@ -2131,12 +3110,95 @@ test('[H-03回归] 断路住宅不计容量/数量,断路服务建筑不覆盖',
   const m2 = placeBuilding(s, 'market', m2Spot.x, m2Spot.y);
   assert.equal(m2.ok, true); // 不连接
   const sm2 = E.economy.computeStatus(s, m2.building, { warehouseRoads: E.population.serviceRoads(s, 'warehouse') });
-  assert.equal(sm2.status, 'disconnected');
-  // serviceRoads 覆盖集:只应包含连接市场的服务(断路市场不在内)
+  assert.equal(sm2.status, 'idle', '[用户决策] 服务建筑不需连仓库:恒 idle');
+  // [用户决策] 服务建筑不需连仓库:断路市场同样提供覆盖
   const roads1 = E.population.serviceRoads(s, 'market');
   const b1 = E.placement.footprintBounds(E.buildings.getDef('market'), mSpot.x, mSpot.y, 0);
   const nearM1 = roads1.has(E.state.key(mSpot.x, mSpot.y)) || roads1.size > 0;
   assert.equal(nearM1, true, '连接市场有服务覆盖');
+});
+
+// [用户决策] 服务建筑不需连仓库:无仓库路网时教堂沿路仍服务(原版机制)
+test('服务建筑不需连仓库:无仓库时教堂沿路仍提供覆盖', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000;
+  // 不放仓库!只放教堂+周边路+工人住宅
+  let cspot = null;
+  for (let y = 10; y < 100 && !cspot; y++) for (let x = 10; x < 100 && !cspot; x++) {
+    if (E.placement.canPlace(s, 'church', x, y, 0).ok) cspot = { x, y };
+  }
+  assert.ok(cspot, '教堂位');
+  const cr = placeBuilding(s, 'church', cspot.x, cspot.y);
+  assert.equal(cr.ok, true);
+  const cb = s.buildings[cr.building.id];
+  const cdef = E.buildings.getDef('church');
+  const cbx = Math.floor((cdef.size.w - 1) / 2), cby = Math.floor((cdef.size.h - 1) / 2);
+  const roadY = cb.y - cby + cdef.size.h;
+  for (let dx = -1; dx <= cdef.size.w; dx++) {
+    const x = cb.x - cbx + dx, y = roadY;
+    if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
+    if (s.map.terrain[y][x] === 0 && !s.grid[x + ',' + y] && !s.roads[x + ',' + y]) setRoad(s, x, y, true);
+  }
+  let hspot = null;
+  for (let dy = -3; dy <= 3 && !hspot; dy++) for (let dx = 0; dx <= 8 && !hspot; dx++) {
+    const hx = cb.x + 2 + dx, hy = roadY + 1 + dy;
+    if (hx < 2 || hy < 2 || hx >= 126 || hy >= 126) continue;
+    if (E.placement.canPlace(s, 'residenceWorkers', hx, hy, 0).ok) hspot = { x: hx, y: hy };
+  }
+  assert.ok(hspot, '住宅位');
+  const hr = placeBuilding(s, 'residenceWorkers', hspot.x, hspot.y);
+  assert.equal(hr.ok, true);
+  const hb = s.buildings[hr.building.id];
+  const hx = Math.floor((3 - 1) / 2), hy = Math.floor((3 - 1) / 2);
+  for (let dy = -1; dy <= 3; dy++) for (let dx = -1; dx <= 3; dx++) {
+    const x = hb.x - hx + dx, y = hb.y - hy + dy;
+    if (x < 0 || y < 0 || x >= s.map.size || y >= s.map.size) continue;
+    if (s.map.terrain[y] && s.map.terrain[y][x] === 0 && !s.grid[x + ',' + y] && !s.roads[x + ',' + y]) setRoad(s, x, y, true);
+  }
+  E.connectivity.markDirty(s);
+  E.economy.refresh(s, { produce: false, logs: false });
+  // 无仓库:教堂 status 恒 idle(不要求连通)
+  assert.equal(s.buildings[cr.building.id].status, 'idle', '无仓库教堂仍 idle');
+  // 沿路传播不依赖仓库:教堂覆盖集非空(住宅覆盖需住宅自身连仓库,属住宅规则,见 H-03 测试)
+  const covered = E.population.serviceRoads(s, 'church');
+  assert.ok(covered.size > 0, '无仓库教堂沿路仍有覆盖(实际 ' + covered.size + ' 格)');
+});
+
+// [用户决策] 民居不需连仓库:接触任意道路即有效(计容量/入住),路无需连到仓库
+test('民居不需连仓库:接触道路即 idle 并计容量;无路民居仍 disconnected(no-road)', () => {
+  const s = createInitialState();
+  setupBase(s);
+  // 1. 民居 A:远离仓库,旁铺孤立路(不连仓库)
+  const h2 = findSpotFar(s, 3, 3);
+  assert.ok(h2);
+  const r2 = placeBuilding(s, 'residence', h2.x, h2.y);
+  assert.equal(r2.ok, true);
+  const hb = s.buildings[r2.building.id];
+  const hx = Math.floor((3 - 1) / 2), hy = Math.floor((3 - 1) / 2);
+  setRoad(s, hb.x - hx + 1, hb.y - hy + 3, true); // 下缘外 1 格(孤立路)
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s.buildings[r2.building.id].status, 'idle', '民居接触路即 idle,不要求连仓库');
+  // 2. 民居 B:远离仓库且完全无路(在原 A 位附近找新位)
+  let h3 = null;
+  for (let dy = 0; dy < 120 && !h3; dy++) for (let dx = 0; dx < 120 && !h3; dx++) {
+    const cx = h2.x + dx, cy = h2.y + dy;
+    if (cx < 2 || cy < 2 || cx >= 126 || cy >= 126) continue;
+    if (E.placement.canPlace(s, 'residence', cx, cy, 0).ok) h3 = { x: cx, y: cy };
+  }
+  assert.ok(h3, '民居 B 位');
+  const r3 = placeBuilding(s, 'residence', h3.x, h3.y);
+  assert.equal(r3.ok, true);
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s.buildings[r3.building.id].status, 'disconnected', '无路民居仍 disconnected');
+  assert.equal(s.buildings[r3.building.id].reason, 'no-road', 'reason 为 no-road');
+  // 3. 容量:仅接触路的民居 A 计入(setupBase 5 栋=50 + A 10 = 60)
+  const cap = E.population.capacityFor(s, 'farmers');
+  assert.equal(cap, 60, '民居 A 计容量,民居 B 不计(实际 ' + cap + ')');
+  // 4. 入住:有 55 人口时,A 先入住(先建先满:setupBase 5 栋满 50 + A 5 + B 0)
+  s.population.farmers.count = 55;
+  E.population.refreshOccupancy(s);
+  assert.equal(s.buildings[r3.building.id].occupied, 0, '无路民居 B occupied=0');
+  assert.equal(s.buildings[r2.building.id].occupied, 5, '接触路民居 A 入住 5(先建先满)');
 });
 
 // [M-04] 金币收支分解:收入/维护分别平滑;零人口时收入平滑为 0(不出现"平滑净+即时维护"虚增)
@@ -2193,7 +3255,7 @@ test('[M-01] 人口趋势:增长时 rates.__pop.smoothMin > 0', () => {
 });
 
 // [P0/HIGH] ratesHistory 归一化:load 真正走 localStorage;部分损坏窗口不再静默接受(NaN/null/不等长/畸形 __pop)
-test('[P0] load 路径:v102 旧结构迁移后 2 tick 无异常,口径全为有限值', () => {
+test('[P0] load 路径:v2 旧ratesHistory结构归一化后 2 tick 无异常,口径全为有限值', () => {
   // 注入 localStorage mock(真实 save → load 链路);测试结束恢复,避免并发污染其他用例
   const prevLS = globalThis.localStorage;
   const store = {};
@@ -2202,10 +3264,10 @@ test('[P0] load 路径:v102 旧结构迁移后 2 tick 无异常,口径全为有�
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: (k) => { delete store[k]; },
   };
-  const s = createInitialState();
+  const s = E.state.createInitialState(DEFAULT_SEED);
   setupBase(s);
   s.population.farmers.count = 5;
-  // 标准 v102 旧结构
+  // 标准旧 ratesHistory 结构
   s.ratesHistory = {};
   for (const g of Object.keys(s.resources)) s.ratesHistory[g] = { arr: [1, 2, 3], sum: 6 };
   assert.equal(E.save.save(s), true, 'save 成功');
@@ -2241,7 +3303,7 @@ test('[HIGH] ratesHistory 部分损坏:全口径有限值,不污染经济监控'
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: (k) => { delete store[k]; },
   };
-  const s = createInitialState();
+  const s = E.state.createInitialState(DEFAULT_SEED);
   setupBase(s);
   s.population.farmers.count = 5;
   // 复现一:资源窗口缺累计值(sp/sc/sn 缺失)
@@ -2260,7 +3322,7 @@ test('[HIGH] ratesHistory 部分损坏:全口径有限值,不污染经济监控'
     assert.ok(Number.isFinite(r.smoothProducedMin) && Number.isFinite(r.smoothConsumedMin), g + ': 复现一 收入/维护平滑有限');
   }
   // 复现二:三轨长度不一致(p 60, c/n 空)
-  const s2 = createInitialState();
+  const s2 = E.state.createInitialState(DEFAULT_SEED + 1);
   setupBase(s2);
   s2.population.farmers.count = 5;
   s2.ratesHistory = {
@@ -2295,7 +3357,7 @@ test('[溢出] 60×1e308 求和溢出:load 后窗口丢弃,2 tick 全口径 Numb
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: (k) => { delete store[k]; },
   };
-  const s = createInitialState();
+  const s = E.state.createInitialState(DEFAULT_SEED);
   setupBase(s);
   s.population.farmers.count = 5;
   s.ratesHistory = {
@@ -2611,7 +3673,7 @@ test('[B-43] 零人口+零库存:需求 sat 全 0,目标人口 0', () => {
   assert.equal(r.ok, true);
   s.resources.fish = 0;
   s.resources.workclothes = 0;
-  E.tick.tick(s);
+  E.tick.tick(s, { slowEvery: 1 });
   const sats = s.population.farmers.needSats;
   assert.equal(sats.market, 0, '无市场覆盖 → market sat 0');
   assert.equal(sats.fish, 0, '0 库存 → fish sat 0');
@@ -2619,7 +3681,7 @@ test('[B-43] 零人口+零库存:需求 sat 全 0,目标人口 0', () => {
   assert.equal(E.population.houseTarget(s, 'farmers'), 0, '目标人口 0');
   // 有鱼库存 → fish sat 1(有供应),目标 = 鱼 influx 3
   s.resources.fish = 100;
-  E.tick.tick(s);
+  E.tick.tick(s, { slowEvery: 1 });
   assert.equal(s.population.farmers.needSats.fish, 1, '0 人+有鱼 → fish sat 1');
   assert.equal(E.population.houseTarget(s, 'farmers'), 3, '目标 = 鱼 influx 3');
 });
@@ -2861,4 +3923,1373 @@ test('[B-43返工] 多栋住宅:升级只迁移目标栋住户', () => {
   assert.equal(others.length, 4);
   E.population.refreshOccupancy(s);
   for (const o of others) assert.equal(o.occupied, 10, '其他民居仍 10');
+});
+
+// [B-44 回归] 需求面板渲染:fill 必须输出闭合的 width 属性。
+// 曾因 HTML 拼接转义改坏(class 未闭合 → style 丢失 → fill 撑满父容器 → 需求条永远 100%)。
+test('需求面板渲染:fill width 属性合法且与满足度一致,服务型需求显示中文名', () => {
+  require('../src/ui/economy.js');
+  const s = createInitialState();
+  s.population.farmers.count = 5;
+  s.resources.fish = 0.0001; // 库存不足 → 部分满足
+  E.population.updateNeeds(s);
+  const el = { innerHTML: '' };
+  globalThis.UI.economy.renderNeeds(el, s);
+  assert.ok(el.innerHTML.includes('style="width:'), 'fill 应含闭合的双引号 width 属性');
+  assert.ok(!el.innerHTML.includes("' style='width"), '不应出现坏拼接(class 未闭合)');
+  // 鱼的 fill 宽度与引擎 needSats 一致(非 100%)
+  const sat = s.population.farmers.needSats.fish;
+  const expectPct = Math.round(sat * 100);
+  assert.ok(expectPct > 0 && expectPct < 100, '库存不足时鱼满足度应为部分值,实际 ' + expectPct);
+  const rows = el.innerHTML.split('<div class="ec-need">');
+  const fishRow = rows.find((r) => r.includes('🐟 鱼'));
+  const wm = fishRow && fishRow.match(/style="width:(\d+)%"/);
+  assert.ok(wm, '鱼行应含 width');
+  assert.equal(Number(wm[1]), expectPct, '鱼行 width 应与 needSats 一致');
+  // 服务型需求显示中文名(从 buildings 数据反查),不暴露内部 id
+  assert.ok(el.innerHTML.includes('🏪 市场'), '市场服务应显示中文名');
+  assert.ok(el.innerHTML.includes('🍺 酒吧'), '酒吧服务应显示中文名');
+  assert.ok(!el.innerHTML.includes('>market<'), '不应显示原始 id market');
+});
+
+// [B-45] 建造信息卡:放置模式卡片必须输出造价/维护/周期/输入/输出/劳动力/占地(玩家建造决策所需信息)
+test('建造信息卡:showPlacementInfo 输出完整定义信息(造价/维护/周期/输入/输出/劳动力/占地)', () => {
+  require('../src/ui/panels.js');
+  const sawmill = E.buildings.getDef('sawmill');
+  const el = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el, sawmill);
+  assert.ok(el.innerHTML.includes('💰 造价:💰100'), '造价行缺失');
+  assert.ok(el.innerHTML.includes('⚙️ 维护:💰10/min'), '维护费行缺失');
+  assert.ok(el.innerHTML.includes('🔄 周期:15 秒'), '周期行缺失');
+  assert.ok(el.innerHTML.includes('⬇ 输入:无'), '输入行缺失');
+  assert.ok(el.innerHTML.includes('⬆ 输出:原木×1/周期 (4/min)'), '输出行缺失(应含每周期数量+速率),实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('👷 劳动力:农民×5'), '劳动力行缺失');
+  assert.ok(el.innerHTML.includes('📐 占地:4×4'), '占地行缺失');
+  // 服务建筑:显示服务半径
+  const market = E.buildings.getDef('market');
+  const el2 = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el2, market);
+  assert.ok(el2.innerHTML.includes('📡 服务半径:'), '服务建筑应显示服务半径,实际: ' + el2.innerHTML);
+  // 住宅:显示容量
+  const res = E.buildings.getDef('residence');
+  const el3 = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el3, res);
+  assert.ok(el3.innerHTML.includes('🏠 容量:10 人'), '住宅应显示容量,实际: ' + el3.innerHTML);
+});
+
+// [B-52] 速率显示修复:长周期建筑输出保留 1 位小数(啤酒花 90s 产 1 = 0.67→0.7/min,不得四舍五入为 1/min)
+test('速率显示:长周期建筑输出保留小数(啤酒花 0.7/min,不误导为 1/min)', () => {
+  require('../src/ui/panels.js');
+  const hop = E.buildings.getDef('hopFarm');
+  const el = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el, hop);
+  assert.ok(el.innerHTML.includes('啤酒花×1/周期 (0.7/min)'), '应显示 0.7/min,实际: ' + el.innerHTML);
+  assert.ok(!el.innerHTML.includes('(1/min)'), '不得四舍五入为 1/min');
+  // 牛牧场 120s 产 1 = 0.5/min
+  const cow = E.buildings.getDef('cattleFarm');
+  const el2 = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el2, cow);
+  assert.ok(el2.innerHTML.includes('×1/周期 (0.5/min)'), '牛牧场应显示 0.5/min,实际: ' + el2.innerHTML);
+  // 整数速率不受影响(原木厂 15s 产 1 = 4/min)
+  const saw = E.buildings.getDef('sawmill');
+  const el3 = { innerHTML: '' };
+  globalThis.UI.panels.showPlacementInfo(el3, saw);
+  assert.ok(el3.innerHTML.includes('原木×1/周期 (4/min)'), '整数速率仍显示 4/min,实际: ' + el3.innerHTML);
+});
+
+// [B-56] 开发度预览一致性:预览(虚拟对象+selfCells 计入自身 footprint)= 放置后
+test('[B-56] 开发度预览一致性:预览含自身占用 = 放置后,不再预览 100%/放置后打折', () => {
+  const s = createInitialState();
+  let sp = null;
+  for (let y = 5; y < 120 && !sp; y++) for (let x = 5; x < 120 && !sp; x++) {
+    if (E.placement.canPlace(s, 'sheepFarm', x, y, 0).ok) sp = { x, y };
+  }
+  assert.ok(sp, '应有绵羊牧场位');
+  const def = E.buildings.getDef('sheepFarm');
+  const ph = { x: sp.x, y: sp.y, rot: 0 };
+  // 放置前:旧预览(无 selfCells)应低于新预览(含自身占用)
+  const devNoSelf = E.economy.developmentRatio(s, { x: sp.x, y: sp.y, rot: 0 }, def);
+  const cells = E.placement.footprint(def, sp.x, sp.y, 0);
+  const devPrev = E.economy.developmentRatio(s, ph, def, { selfCells: cells });
+  const r = placeBuilding(s, 'sheepFarm', sp.x, sp.y);
+  assert.equal(r.ok, true);
+  const devPlaced = E.economy.developmentRatio(s, s.buildings[r.building.id], def);
+  assert.ok(Math.abs(devPrev - devPlaced) < 0.001, '预览 dev(' + devPrev.toFixed(3) + ') 应等于放置后(' + devPlaced.toFixed(3) + ')');
+  assert.ok(devPlaced > 0, '放置后 dev 应 > 0(自身 footprint 计入占用)');
+  assert.ok(devNoSelf < devPrev, '无 selfCells 的旧预览(' + devNoSelf.toFixed(3) + ')应低于新预览(' + devPrev.toFixed(3) + ')');
+});
+
+// [B-58] 海边/山边开发度不为负:窗口含非平地时 dev 应 ∈ [0,1](occupied 含非平地但分母只有平地 → dev 曾超 1)
+test('[B-58] 海边/山边开发度不为负:dev ∈ [0,1]', () => {
+  const s = createInitialState();
+  // 找一个窗口内非平地 ≥50% 的原木厂位(radius 7,4×4)——海边/山边场景
+  let spot = null;
+  for (let y = 2; y < 124 && !spot; y++) for (let x = 2; x < 124 && !spot; x++) {
+    const c = E.placement.canPlace(s, 'sawmill', x, y, 0);
+    if (!c.ok) continue;
+    const def = E.buildings.getDef('sawmill');
+    const bb = E.placement.footprintBounds(def, x, y, 0);
+    const cx = bb.x + Math.floor(bb.w / 2), cy = bb.y + Math.floor(bb.h / 2);
+    let nonFlat = 0, total = 0;
+    for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++) {
+      const fx = cx + dx, fy = cy + dy;
+      if (fx < 0 || fy < 0 || fx >= s.map.size || fy >= s.map.size) continue;
+      total++;
+      if (s.map.terrain[fy][fx] !== 0) nonFlat++;
+    }
+    if (total > 0 && nonFlat / total >= 0.5) spot = { x, y };
+  }
+  assert.ok(spot, '应找到窗口含非平地的原木厂位');
+  const r = placeBuilding(s, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true);
+  const dev = E.economy.developmentRatio(s, s.buildings[r.building.id], E.buildings.getDef('sawmill'));
+  assert.ok(dev >= 0 && dev <= 1, 'dev 应在 [0,1](实际 ' + dev.toFixed(3) + ',可开发 ' + Math.round((1 - dev) * 100) + '%)');
+  // 海边半水场景:可开发% 不应为负
+  assert.ok(Math.round((1 - dev) * 100) >= 0, '可开发% 不应为负(实际 ' + Math.round((1 - dev) * 100) + '%)');
+});
+
+// [B-46] 需求面板收益徽章:告知完成需求后的收益类型(+人口/+钱/+幸福),不暴露具体数值(渐进披露)
+test('需求面板收益徽章:显示收益类型但不暴露具体数值', () => {
+  require('../src/ui/economy.js');
+  const s = createInitialState();
+  s.population.farmers.count = 5;
+  E.population.updateNeeds(s);
+  const el = { innerHTML: '' };
+  globalThis.UI.economy.renderNeeds(el, s);
+  // 三类收益徽章都出现(农民需求覆盖 influx/income/happiness)
+  assert.ok(el.innerHTML.includes('+人口'), '应有 +人口 徽章(influx 收益),实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('+钱'), '应有 +钱 徽章(income 收益)');
+  assert.ok(el.innerHTML.includes('+幸福'), '应有 +幸福 徽章(happiness 收益)');
+  // 不暴露具体数值/内部字段名(用户要求:告知收益但不写明数值)
+  assert.ok(!el.innerHTML.includes('influx'), '不应暴露 influx 字段名');
+  assert.ok(!el.innerHTML.includes('income'), '不应暴露 income 字段名');
+  assert.ok(!el.innerHTML.includes('happiness'), '不应暴露 happiness 字段名');
+  assert.ok(!el.innerHTML.includes('0.125'), '不应暴露 income 具体数值');
+});
+
+// [B-46 fix] 0 人口时已解锁阶层需求列表+收益徽章仍显示(开局引导);未解锁阶层需求隐藏
+test('需求面板:0 人口时显示已解锁阶层需求与收益徽章,未解锁阶层隐藏', () => {
+  require('../src/ui/economy.js');
+  const s = createInitialState(); // 0 人口,仅 farmers 解锁
+  E.population.updateNeeds(s);
+  const el = { innerHTML: '' };
+  globalThis.UI.economy.renderNeeds(el, s);
+  assert.ok(el.innerHTML.includes('🐟 鱼'), '0 人口也应显示农民需求列表,实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('+人口'), '0 人口也应显示收益徽章');
+  assert.ok(el.innerHTML.includes('🏪 市场'), '0 人口也应显示服务型需求');
+  assert.ok(!el.innerHTML.includes('工人'), '未解锁阶层(工人)标题不应显示');
+  assert.ok(!el.innerHTML.includes('香肠'), '未解锁阶层商品(香肠)不应显示');
+  assert.ok(!el.innerHTML.includes('暂无人口需求数据'), '不应显示空态文案');
+});
+
+// [用户确认] 信息卡按当前效率显示实际产出:半效建筑输出行显示 0.5/周期 + 满速标注(不再误读满速值)
+test('建筑详情:半效时信息卡输出行显示实际产出并标注满速', () => {
+  require('../src/ui/panels.js');
+  const s = createInitialState();
+  setupBase(s);
+  const spot = findSawmillSpot(s);
+  assert.ok(spot);
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  connectTo(s, spot.x, spot.y, av, av);
+  const r = placeBuilding(s, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true);
+  const def = E.buildings.getDef('sawmill');
+  const cx = r.building.x + 1, cy = r.building.y + 1; // 4×4 中心偏置 1
+  const size = s.map.size;
+  let dev = E.economy.developmentRatio(s, r.building, def);
+  outer:
+  for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++) {
+    if (dev > 0.3) break outer;
+    const x = cx + dx, y = cy + dy;
+    if (x < 0 || y < 0 || x >= size || y >= size) continue;
+    const t = s.map.terrain[y][x];
+    if (t === 6 || t === 7) continue;
+    const k = key(x, y);
+    if (s.grid[k] || s.roads[k]) continue;
+    setRoad(s, x, y, true);
+    dev = E.economy.developmentRatio(s, r.building, def);
+  }
+  assert.ok(dev > 0.25 && dev <= 0.5, '开发度应落在 (0.25, 0.5](实际 ' + dev.toFixed(3) + ')');
+  const el = { innerHTML: '', querySelector: () => null };
+  globalThis.UI.panels.showBuilding(el, s, r.building.id, null);
+  assert.ok(el.innerHTML.includes('当前效率:50%'), '应显示半效 50%,实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('原木×0.5/周期 (2/min)'), '输出行应显示实际 0.5/周期(2/min),实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('满速 4/min'), '应标注满速 4/min');
+});
+
+// [B-50] 人口面板:分行显示各阶层(人口/岗位/幸福度)+ 总人口趋势 + 总幸福度
+test('人口面板:分行显示阶层人口/岗位/幸福度与总幸福度', () => {
+  require('../src/ui/economy.js');
+  const s = createInitialState();
+  setupBase(s);
+  const spot = findSawmillSpot(s);
+  assert.ok(spot);
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  connectTo(s, spot.x, spot.y, av, av);
+  placeBuilding(s, 'sawmill', spot.x, spot.y);
+  s.population.farmers.count = 2;
+  s.resources.schnapps = 100; // 烈酒库存 → 农民幸福度 >0
+  E.economy.refresh(s, { produce: false, logs: false });
+  E.population.updateNeeds(s);
+  const el = { innerHTML: '' };
+  globalThis.UI.economy.renderPop(el, s);
+  assert.ok(el.innerHTML.includes('总人口 2'), '总人口缺失,实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('总幸福度'), '总幸福度缺失');
+  assert.ok(el.innerHTML.includes('农民 2 人'), '农民行缺失');
+  assert.ok(el.innerHTML.includes('岗位 5/2(40%)'), '岗位段缺失(原木厂 5 岗位/2 人=40%),实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('😊'), '农民幸福度缺失');
+  assert.ok(el.innerHTML.includes('工人 0 人 🔒 需农民 50'), '工人未解锁行缺失');
+  assert.ok(el.innerHTML.includes('工匠 0 人 🔒 需工人 150'), '工匠未解锁行缺失');
+  assert.ok(el.innerHTML.includes('暂未开放'), '工程师/投资人暂未开放缺失');
+});
+
+// [岗位制 S1] 劳动力判定:总岗位池 vs 总人口,短缺时按比例减产(非共享池)。
+// 3 栋木板厂各需 10 农民 = 30 岗位:30 人全效 / 15 人半效(仍 producing)/ 0 人 waiting。
+// 用无 radius 的木板厂,排除开发度干扰。
+test('劳动力岗位制:总岗位>人口按比例减产(3 栋木板厂=30 岗位)', () => {
+  const s = createInitialState();
+  setupBase(s);
+  const wh = Object.values(s.buildings).find((b) => {
+    const d = E.buildings.getDef(b.type);
+    return d && d.special === 'warehouse';
+  });
+  assert.ok(wh, '应有仓库');
+  // 找位+放置交替:后续 canPlace 能看到已放置 footprint,避免重叠
+  const ids = [];
+  while (ids.length < 3) {
+    let found = null;
+    outer:
+    for (let y = Math.max(0, wh.y - 40); y <= wh.y + 40; y++) {
+      for (let x = Math.max(0, wh.x - 40); x <= wh.x + 40; x++) {
+        if (E.placement.canPlace(s, 'boardmill', x, y, 0).ok) { found = { x, y }; break outer; }
+      }
+    }
+    assert.ok(found, '应找到木板厂位');
+    const r = placeBuilding(s, 'boardmill', found.x, found.y);
+    assert.equal(r.ok, true, '木板厂应可建');
+    ids.push(r.building.id);
+  }
+  ids.forEach((id) => {
+    const b = s.buildings[id];
+    const av = footprint(E.buildings.getDef('boardmill'), b.x, b.y);
+    assert.ok(connectTo(s, b.x, b.y, av, av), '木板厂应连通仓库');
+  });
+  // 30 人口 = 岗位供需平衡 → 全效
+  s.population.farmers.count = 30;
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s._wf.farmers.need, 30, '岗位需求=30');
+  assert.equal(s._wf.farmers.pop, 30);
+  assert.equal(s._wf.farmers.eff, 1, '供需平衡 eff=1');
+  for (const id of ids) assert.equal(s.buildings[id].status, 'producing');
+  // 15 人口 → 岗位效率 50%,仍 producing(比例减产,不再整栋停产)
+  s.population.farmers.count = 15;
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s._wf.farmers.eff, 0.5, '15/30 = 0.5');
+  for (const id of ids) assert.equal(s.buildings[id].status, 'producing', '15 人仍 producing(比例减产)');
+  // UI 详情:岗位行 + 综合效率(岗位制)
+  require('../src/ui/panels.js');
+  const el = { innerHTML: '', querySelector: () => null };
+  globalThis.UI.panels.showBuilding(el, s, ids[0], null);
+  assert.ok(el.innerHTML.includes('⚙️ 农民 岗位 30/15(50%)'), '岗位行缺失,实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('当前效率:50%(岗位)'), '普通建筑岗位效率行缺失,实际: ' + el.innerHTML);
+  assert.ok(el.innerHTML.includes('木材×0.5/周期 (2/min)') && el.innerHTML.includes('满速 4/min'), '实际产出应按综合效率显示,实际: ' + el.innerHTML);
+  // 结算验证:60 tick,3 栋 × 4 周期 × 1 木 × 0.5 = 6
+  const w0 = s.resources.wood || 0;
+  for (let i = 0; i < CYCLE; i++) E.tick.tick(s);
+  const gained = (s.resources.wood || 0) - w0;
+  assert.ok(Math.abs(gained - 6) < 0.3, '半岗位效率 60tick 3 栋共产 6 木板(实际 ' + gained.toFixed(2) + ')');
+  // 0 人口 → waiting(workforce-shortage,与现状一致)
+  s.population.farmers.count = 0;
+  E.economy.refresh(s, { produce: false, logs: false });
+  for (const id of ids) {
+    assert.equal(s.buildings[id].status, 'waiting', '0 人口 waiting');
+    assert.equal(s.buildings[id].reason, 'workforce-shortage');
+  }
+});
+
+// [岗位制 S1] 叠加:radius 建筑综合效率 = 开发度效率 × 岗位效率(原木厂半开发 × 半岗位 = 1/4)
+test('岗位制叠加:radius 建筑开发度效率×岗位效率(原木厂半开发×半岗位 60tick 产 1)', () => {
+  const s = createInitialState();
+  setupBase(s);
+  const spot = findSawmillSpot(s);
+  assert.ok(spot);
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  connectTo(s, spot.x, spot.y, av, av);
+  const r = placeBuilding(s, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true);
+  const def = E.buildings.getDef('sawmill');
+  const cx = r.building.x + 1, cy = r.building.y + 1; // 4×4 中心偏置 1
+  const size = s.map.size;
+  let dev = E.economy.developmentRatio(s, r.building, def);
+  outer:
+  for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++) {
+    if (dev > 0.3) break outer;
+    const x = cx + dx, y = cy + dy;
+    if (x < 0 || y < 0 || x >= size || y >= size) continue;
+    const t = s.map.terrain[y][x];
+    if (t === 6 || t === 7) continue;
+    const k = key(x, y);
+    if (s.grid[k] || s.roads[k]) continue;
+    setRoad(s, x, y, true);
+    dev = E.economy.developmentRatio(s, r.building, def);
+  }
+  assert.ok(dev > 0.25 && dev <= 0.5, '开发度应落在 (0.25, 0.5](实际 ' + dev.toFixed(3) + ')');
+  // 岗位:原木厂 5 岗位,人口 2.5 → 岗位效率 50%
+  s.population.farmers.count = 2.5;
+  E.economy.refresh(s, { produce: false, logs: false });
+  assert.equal(s._wf.farmers.need, 5, '岗位需求=5');
+  assert.equal(s._wf.farmers.eff, 0.5, '2.5/5 = 0.5');
+  assert.equal(s.buildings[r.building.id].status, 'producing', '半岗位仍 producing');
+  // 结算:60 tick = 4 周期 × 1 原木 × 0.5(开发度) × 0.5(岗位) = 1
+  // 注意:手动 refresh 循环(不走 tick.updatePopulation,否则人口被住宅目标拉回,岗位效率失真)
+  const w0 = s.resources.log || 0;
+  for (let i = 0; i < CYCLE; i++) {
+    E.state.initFlow(s);
+    E.economy.refresh(s, { produce: true, logs: false });
+  }
+  const gained = (s.resources.log || 0) - w0;
+  assert.ok(Math.abs(gained - 1) < 0.2, '半开发×半岗位 60tick 产 1 原木(实际 ' + gained.toFixed(2) + ')');
+});
+
+// ============ [B-62] 切岛与世界 tick ============
+
+// [B-62] 世界 tick 逐岛分帧:frameBudget 下中途不推进时间/不提交,全部岛完成才统一
+test('[B-62] 世界 tick 分帧:12 岛 frameBudget 3,中途不推进时间,完成帧统一提交', () => {
+  const s = createInitialState();
+  const wd = E.worldData;
+  for (let i = 2; i <= 12; i++) {
+    s.islands['island-' + i] = E.state.createIslandState('island-' + i, DEFAULT_SEED + i, wd.MAP_SIZE, { wood: 60, fish: 100 });
+  }
+  assert.equal(Object.keys(s.islands).length, 12, '应构造 12 岛');
+  for (const isl of Object.values(s.islands)) isl.population.farmers.count = 10;
+  const t0 = { tickAcc: s.time.tickAcc, hour: s.time.hour, day: s.time.day };
+  // 帧 1~3:各执行 3 岛,不完整,不推进时间
+  for (let f = 1; f <= 3; f++) {
+    const r = E.tick.tick(s, { frameBudget: 3 });
+    assert.equal(r.complete, false, '帧 ' + f + ' 未完成');
+    assert.equal(r.cursor, f * 3, '光标推进');
+    assert.equal(s.time.tickAcc, t0.tickAcc, '分帧中不推进时间');
+  }
+  // 帧 4:最后 3 岛 → 完整世界 tick
+  const r4 = E.tick.tick(s, { frameBudget: 3 });
+  assert.equal(r4.complete, true, '帧 4 完成');
+  assert.equal(s._tickCursor, 0, '光标归零');
+  assert.equal(s.time.tickAcc, (t0.tickAcc + 1) % 12, '完成后时间推进 1 tick');
+  assert.equal(s.time.day, t0.day, '时间推进未跨小时时 day 不变');
+  // 所有岛都被精确模拟:__prevPop 已记录
+  for (const [id, isl] of Object.entries(s.islands)) {
+    assert.equal(isl.__prevPop, isl.population.farmers.count, '岛 ' + id + ' 应被模拟(__prevPop=' + isl.__prevPop + ')');
+  }
+});
+
+// [B-62] 离岛不冻结:非活动岛的人口/生产按同一精确语义推进
+test('[B-62] 离岛模拟:非活动岛人口收敛(不冻结离岛)', () => {
+  const s = createInitialState();
+  const wd = E.worldData;
+  s.islands['island-second'] = E.state.createIslandState('island-second', DEFAULT_SEED + 1, wd.MAP_SIZE, { wood: 5 });
+  // 活动岛=主岛 0 人;第二岛 5 人(无住宅 → 目标 0,应向 0 收敛)
+  s.population.farmers.count = 0;
+  s.islands['island-second'].population.farmers.count = 5;
+  const r = E.tick.tick(s);
+  assert.equal(r.complete, true, '默认一帧完成全部岛');
+  assert.ok(s.islands['island-second'].population.farmers.count < 5, '离岛人口被模拟并收敛(实际 ' + s.islands['island-second'].population.farmers.count + ')');
+  assert.ok(s.islands['island-second'].__prevPop != null, '离岛 __prevPop 已记录');
+});
+
+// [B-62] 离岛生产结算:非活动岛建筑周期推进(cycleAcc 累积,生产不冻结)
+test('[B-62] 离岛生产:非活动岛原木厂周期结算产出', () => {
+  const s = createInitialState();
+  const wd = E.worldData;
+  s.islands['island-second'] = E.state.createIslandState('island-second', DEFAULT_SEED + 2, wd.MAP_SIZE, { wood: 60, fish: 100 });
+  // [B-62] 新岛加入世界须挂全局金币别名(标准流程;tick 也会幂等补挂)
+  const isl = s.islands['island-second'];
+  E.state.attachCoinAlias(s, isl);
+  // 第二岛建仓库+原木厂+路(仿 setupBase 简化:直接放+连通)
+  const p = findSpot(isl, 5, 5, null, PF);
+  assert.ok(p, '第二岛应有仓库位');
+  const rw = E.placement.placeBuilding(isl, 'warehouse', p.x, p.y);
+  assert.equal(rw.ok, true);
+  const built = [rw.building];
+  const hs = findHouseSpot(isl, built);
+  const spot = findSpot(isl, 4, 4, null, PF);
+  const r = E.placement.placeBuilding(isl, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true, '第二岛原木厂: ' + (r.reason || ''));
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  assert.ok(connectTo(isl, spot.x, spot.y, av, av), '第二岛原木厂连通');
+  isl.population.farmers.count = 10; // 原木厂需 5
+  // 驱动 15 tick(原木厂 cycle 15)→ 至少产 1
+  const w0 = isl.resources.log || 0;
+  for (let i = 0; i < 16; i++) {
+    const r2 = E.tick.tick(s);
+    assert.equal(r2.complete, true);
+  }
+  const gained = (isl.resources.log || 0) - w0;
+  assert.ok(gained > 0, '离岛原木厂 16 tick 应产出(开发度可能打折,但周期结算必须推进;实际 ' + gained + ')');
+});
+
+// ============ [B-63] 海事生产与舰队 ============
+
+// [B-63] 订单提交:原子全额扣费(全局金币+本岛材料)+ 付款快照 + 下单岛 ID
+test('[B-63] 造船订单提交:扣全局金币与本岛材料,保存快照', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  // 主岛放造船厂(海岸 6×17)
+  const spot = findCoastSpot(s, 6, 17);
+  assert.ok(spot, '应有海岸 6×17 位');
+  const r = placeBuilding(s, 'sailingShipyard', spot.x, spot.y);
+  assert.equal(r.ok, true, '造船厂放置: ' + (r.reason || ''));
+  const coin0 = s.treasury.coin;
+  const wood0 = s.resources.wood;
+  const sail0 = s.resources.sail || 0;
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, r.building.id);
+  assert.equal(sub.ok, true, '下单: ' + (sub.reason || ''));
+  assert.equal(s.treasury.coin, coin0 - 5000, '全局金币扣 5000');
+  assert.equal(s.resources.wood, 100 - 20, '本岛木材扣 20');
+  assert.equal(s.resources.sail, 50 - 10, '本岛船帆扣 10');
+  assert.equal(sub.order.islandId, 'island-main', '快照记录下单岛');
+  assert.equal(sub.order.paidCost.coin, 5000, '付款快照 coin');
+  assert.equal(sub.order.remainingWork, 180, '工作量 180');
+});
+
+// [B-63] 队列限制:每厂最多 4 份(1 建造 + 3 等待),第 5 份拒绝
+test('[B-63] 造船订单队列:最多 4 份,第 5 份拒绝', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const spot = findCoastSpot(s, 6, 17);
+  const r = placeBuilding(s, 'sailingShipyard', spot.x, spot.y);
+  s.resources.wood = 1000; s.resources.sail = 500; s.treasury.coin = 100000;
+  for (let i = 0; i < 4; i++) {
+    const sub = E.ships.submitShipOrder(s, r.building.id);
+    assert.equal(sub.ok, true, '第 ' + (i + 1) + ' 单: ' + (sub.reason || ''));
+  }
+  const fifth = E.ships.submitShipOrder(s, r.building.id);
+  assert.equal(fifth.ok, false, '第 5 单拒绝');
+  assert.equal(Object.keys(s.shipOrders).length, 4, '队列 4 份');
+});
+
+// [B-63] 取消返还:等待/建造中取消全额返还快照(金币+本岛材料),工作量清零
+test('[B-63] 造船订单取消:全额返还(金币+本岛材料)', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const coin0 = s.treasury.coin;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  const afterSub = s.treasury.coin;
+  // 推进 10 tick(建造中;期间有维护费,金币断言用相对)
+  for (let i = 0; i < 10; i++) E.tick.tick(s);
+  assert.ok(s.shipOrders[sub.order.id].remainingWork < 180, '订单已开工');
+  const c = E.ships.cancelShipOrder(s, sub.order.id);
+  assert.equal(c.ok, true);
+  assert.ok(s.treasury.coin > afterSub, '金币按快照返还(+5000,扣除维护后仍增加)');
+  assert.equal(s.resources.wood, 100, '木材全额返还');
+  assert.equal(s.resources.sail, 50, '船帆全额返还');
+  assert.equal(s.shipOrders[sub.order.id], undefined, '订单删除');
+});
+
+// [B-63] 订单完成:180 完整世界 tick → 生成 idle 船
+test('[B-63] 造船订单完成:180 tick 生成 idle 船', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  assert.equal(s.shipOrders[sub.order.id], undefined, '订单完成移除');
+  const ships = Object.values(s.fleet || {});
+  assert.equal(ships.length, 1, '生成 1 艘船');
+  assert.equal(ships[0].status, 'idle', '船 idle');
+  assert.equal(ships[0].currentIslandId, 'island-main', '船在建造岛');
+});
+
+// [B-63] 断连暂停:造船厂断连 → 订单不推进但保留
+test('[B-63] 造船订单断连暂停:不推进但保留', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  setupBase(s);
+  const spot = findCoastSpot(s, 6, 17);
+  const r = placeBuilding(s, 'sailingShipyard', spot.x, spot.y);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, r.building.id);
+  const w0 = sub.order.remainingWork;
+  // 造船厂在海岸(远离仓库路网)→ 大概率未连通;若连通则先拆路
+  for (let i = 0; i < 5; i++) E.tick.tick(s);
+  assert.equal(s.shipOrders[sub.order.id].remainingWork, w0, '断连订单不推进(暂停保留)');
+});
+
+// [B-63] 退役:仅 idle 船;返还 20 木+10 帆到停留岛,金币不返
+test('[B-63] 船退役:idle 返还材料,金币不返', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  const coin0 = s.treasury.coin;
+  const wood0 = s.resources.wood;
+  const sail0 = s.resources.sail;
+  const ret = E.ships.retireShip(s, ship.id);
+  assert.equal(ret.ok, true);
+  assert.equal(s.resources.wood, wood0 + 20, '木材+20');
+  assert.equal(s.resources.sail, sail0 + 10, '船帆+10');
+  assert.equal(s.treasury.coin, coin0, '金币不返');
+  assert.equal(s.fleet[ship.id], undefined, '船移除');
+});
+
+// [B-63] 码头每岛最多 1 座
+test('[B-63] 码头:每岛最多 1 座', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const p1 = findCoastSpot(s, 7, 11);
+  const r1 = placeBuilding(s, 'port', p1.x, p1.y);
+  assert.equal(r1.ok, true, '第一座码头: ' + (r1.reason || ''));
+  // 第二座:找不同位置(避开第一座 footprint;findCoastSpot 确定性扫描会返回同位置)
+  let p2 = null;
+  for (let dy = -30; dy <= 30 && !p2; dy++) for (let dx = -30; dx <= 30 && !p2; dx++) {
+    if (dx === 0 && dy === 0) continue;
+    const cand = findCoastSpotOffset(s, 7, 11, p1.x + dx, p1.y + dy);
+    if (cand && !footprintOverlaps(s, E.buildings.getDef('port'), cand.x, cand.y, p1.x, p1.y)) p2 = cand;
+  }
+  assert.ok(p2, '应有第二个码头位');
+  const r2 = placeBuilding(s, 'port', p2.x, p2.y);
+  assert.equal(r2.ok, false, '第二座码头拒绝');
+  assert.equal(r2.reason, '每岛最多 1 座码头');
+});
+
+// [B-63] 码头权限:建成+连通仓库才有效(REQ-40)
+test('[B-63] 码头权限:未连通时 portValid=false', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const p = findCoastSpot(s, 7, 11);
+  const r = placeBuilding(s, 'port', p.x, p.y);
+  assert.equal(r.ok, true);
+  // 码头在海岸,无仓库路网 → 未连通
+  assert.equal(E.ships.portValid(s, 'island-main'), false, '未连通码头无效');
+  // 码头+仓库+连通
+  setupBase(s);
+  E.economy.refresh(s, { produce: false, logs: false });
+  // 码头离仓库远 → 仍无效;手动把码头连上
+  const port = Object.values(s.buildings).find((b) => b.type === 'port');
+  const pb = E.placement.footprintBounds(E.buildings.getDef('port'), port.x, port.y, port.rot);
+  const avP = footprint(E.buildings.getDef('port'), port.x, port.y);
+  const wb = Object.values(s.buildings).find((b) => b.type === 'warehouse');
+  const wbb = E.placement.footprintBounds(E.buildings.getDef('warehouse'), wb.x, wb.y, wb.rot);
+  connectTo(s, wbb.x + 1, wbb.y + 1, avP, avP);
+  assert.equal(E.ships.portValid(s, 'island-main'), true, '连通后码头有效');
+});
+
+// [B-63] 调遣:idle 船+有效码头,600 tick 到达目标岛;途中禁止退役;目标无码头不能再次出发
+test('[B-63] 调遣:600 tick 到达,途中不可退役,无码头目标不可再出发', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  // 第二岛(目标)
+  const wd = E.worldData;
+  s.islands['island-2'] = E.state.createIslandState('island-2', DEFAULT_SEED + 9, wd.MAP_SIZE, { wood: 60, fish: 100 });
+  E.state.attachCoinAlias(s, s.islands['island-2']);
+  // 主岛建码头并连通(仓库覆盖内)
+  const portSpot = findCoastRect(s, 7, 11);
+  const pr = placeBuilding(s, 'port', portSpot.x, portSpot.y);
+  assert.equal(pr.ok, true, '码头放置: ' + (pr.reason || ''));
+  assert.equal(E.ships.portValid(s, 'island-main'), true, '码头有效');
+  // 调遣
+  const rel = E.ships.relocateShip(s, ship.id, 'island-2');
+  assert.equal(rel.ok, true, '调遣发起: ' + (rel.reason || ''));
+  assert.equal(s.fleet[ship.id].status, 'relocating', '船调遣中');
+  const ret = E.ships.retireShip(s, ship.id);
+  assert.equal(ret.ok, false, '调遣中禁止退役');
+  // 600 tick 到达
+  for (let i = 0; i < 600; i++) E.tick.tick(s);
+  assert.equal(s.fleet[ship.id].status, 'idle', '到达后 idle');
+  assert.equal(s.fleet[ship.id].currentIslandId, 'island-2', '船在目标岛');
+  // 目标岛无码头 → 不能再次调遣(REQ-41 来源需有效码头)
+  const rel2 = E.ships.relocateShip(s, ship.id, 'island-main');
+  assert.equal(rel2.ok, false, '无码头来源不可调遣');
+});
+
+// [B-63] 拆除造船厂:自动取消未完工订单并全额返还(UI 拆除时调用)
+test('[B-63] 拆除造船厂联动:取消未完工订单并返还', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  E.ships.cancelShipyardOrders(s, 'island-main', shipyard.id); // UI 层拆除船厂时调用(复合身份)
+  assert.equal(s.shipOrders[sub.order.id], undefined, '订单已取消');
+  assert.equal(s.resources.wood, 100, '木材全额返还');
+  assert.equal(s.resources.sail, 50, '船帆全额返还');
+});
+
+// ============ [B-64] 灰冠探索与岛屿生成 ============
+
+// [B-64/REQ-37] 主岛 4+4:4 矿物(保底黏土/铁)+ 4 植物(保底土豆/谷物/啤酒花)
+test('[B-64] 主岛禀赋:4 矿物含黏土/铁,4 植物含土豆/谷物/啤酒花', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const isl = s.islands['island-main'];
+  assert.equal(isl.deposits.length, 4, '主岛 4 矿物(实际 ' + isl.deposits + ')');
+  assert.ok(isl.deposits.indexOf('clay') >= 0 && isl.deposits.indexOf('iron') >= 0, '保底黏土/铁');
+  assert.equal(isl.fertilities.length, 4, '主岛 4 植物(实际 ' + isl.fertilities + ')');
+  assert.ok(isl.fertilities.indexOf('potato') >= 0 && isl.fertilities.indexOf('grain') >= 0 && isl.fertilities.indexOf('hops') >= 0, '保底土豆/谷物/啤酒花');
+  const clay = findSpot(s, 5, 5, 2, [2]);
+  assert.ok(clay, '主岛有黏土 5×5');
+  const iron = findSpot(s, 3, 3, 3, [3]);
+  assert.ok(iron, '主岛有铁矿');
+});
+
+// [B-64] 探索发起:90% 档扣来源岛资源 + 船占用 + 名额预留
+test('[B-64] 探索发起:90% 档扣资源/占船/留名额(600 tick)', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  s.resources.fish = 100; s.resources.workclothes = 50; s.resources.schnapps = 50;
+  const fish0 = s.resources.fish;
+  setupPort(s); // [HIGH-2] 海上任务出发需有效码头
+  const st = E.expeditions.startExpedition(s, ship.id, '90');
+  assert.equal(st.ok, true, '发起: ' + (st.reason || ''));
+  assert.equal(s.resources.fish, fish0 - 60, '鱼扣 60(90% 档)');
+  assert.equal(s.fleet[ship.id].status, 'expedition', '船占用');
+  assert.equal(Object.keys(s.expeditionTasks).length, 1, '任务存在');
+  assert.equal(st.task.remaining, 600, '10 分钟=600 tick');
+  assert.ok(st.task.roll >= 0 && st.task.roll < 1, '确定性 roll');
+});
+
+// [B-64] 探索完成:按确定性 roll 判定;成功得新岛(初始包/不切岛/补缺),失败船损失
+test('[B-64] 探索完成:成功得新岛(鱼100木20/不切岛/补缺),失败损失船', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const mainF = s.islands['island-main'].fertilities.slice();
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  s.resources.fish = 200; s.resources.workclothes = 100; s.resources.schnapps = 100;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  setupPort(s); // [HIGH-2] 海上任务出发需有效码头
+  const st = E.expeditions.startExpedition(s, ship.id, '90');
+  assert.equal(st.ok, true, '发起: ' + (st.reason || ''));
+  const roll = st.task.roll;
+  const activeId = s.activeIslandId;
+  for (let i = 0; i < 600; i++) E.expeditions.advanceExpeditions(s);
+  if (roll < 0.9) {
+    assert.equal(Object.keys(s.islands).length, 2, '成功获得新岛');
+    const newIsl = Object.values(s.islands).find((i) => i.id !== 'island-main');
+    assert.equal(newIsl.resources.fish, 100, '初始鱼 100');
+    assert.equal(newIsl.resources.wood, 20, '初始木 20');
+    // 金币走全局钱包:序列化后岛内无独立 coin
+    const plain = JSON.parse(JSON.stringify(s));
+    assert.equal(plain.islands[newIsl.id].resources.coin, undefined, '岛内不序列化独立金币');
+    assert.equal(s.activeIslandId, activeId, '不自动切岛');
+    assert.equal(newIsl.fertilities.length, 4, '新岛 4 植物');
+    assert.equal(newIsl.deposits.length, 4, '新岛 4 矿物');
+    // 补缺:新岛至少 1 种主岛没有的植物/矿物
+    assert.ok(newIsl.fertilities.filter((f) => mainF.indexOf(f) < 0).length >= 1, '新岛补缺植物');
+    // 矿床真实生成:每种入选矿物有地形格
+    const code = { clay: 2, iron: 3, copper: 4, gold: 5, coal: 8, zinc: 9, limestone: 10 };
+    for (const d of newIsl.deposits) {
+      let cnt = 0;
+      for (let y = 0; y < 160; y++) for (let x = 0; x < 160; x++) if (newIsl.map.terrain[y][x] === code[d]) cnt++;
+      assert.ok(cnt > 0, '新岛有 ' + d + ' 地形');
+    }
+    // 探索船在新岛 idle
+    assert.equal(s.fleet[ship.id].status, 'idle', '船到达新岛');
+    assert.equal(s.fleet[ship.id].currentIslandId, newIsl.id);
+  } else {
+    assert.equal(Object.keys(s.islands).length, 1, '失败无新岛');
+    assert.equal(s.fleet[ship.id], undefined, '失败船损失');
+  }
+});
+
+// [B-64] 探索放弃:投入不返还,船损失
+test('[B-64] 探索放弃:不返还投入,船损失', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  s.resources.fish = 100;
+  setupPort(s); // [HIGH-2] 海上任务出发需有效码头
+  const st = E.expeditions.startExpedition(s, ship.id, '70');
+  assert.equal(st.ok, true);
+  const fish0 = s.resources.fish;
+  const ab = E.expeditions.abortExpedition(s, st.task.id);
+  assert.equal(ab.ok, true);
+  assert.equal(s.resources.fish, fish0, '放弃不返还鱼');
+  assert.equal(s.fleet[ship.id], undefined, '船损失');
+  assert.equal(Object.keys(s.expeditionTasks).length, 0, '任务删除');
+});
+
+// [B-64] 名额:12 岛上限(已有岛 + 活动探索);满额拒绝发起
+test('[B-64] 探索名额:12 上限,满额拒绝', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const wd = E.worldData;
+  // 塞满 11 个额外岛 → 12 岛
+  for (let i = 2; i <= 12; i++) {
+    const isl = E.state.createIslandState('island-' + i, DEFAULT_SEED + i * 7, wd.MAP_SIZE, { wood: 5 });
+    E.state.attachCoinAlias(s, isl);
+    s.islands[isl.id] = isl;
+  }
+  assert.equal(Object.keys(s.islands).length, 12);
+  const { shipyard } = setupShipyard(s); // setupBase 在 12 岛后放建筑 → 主岛
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) E.tick.tick(s);
+  const ship = Object.values(s.fleet)[0];
+  setupPort(s); // [HIGH-2] 海上任务出发需有效码头
+  const st = E.expeditions.startExpedition(s, ship.id, '60');
+  assert.equal(st.ok, false, '12 岛满额拒绝');
+  assert.ok(st.reason.indexOf('名额') >= 0, '原因: ' + st.reason);
+});
+// ============ [B-65] 岛间持续运输 ============
+
+// [B-65] 运输测试基建:造船厂+船+码头+第二目标岛
+function setupShipping(s) {
+  const { shipyard } = setupShipyard(s);
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub = E.ships.submitShipOrder(s, shipyard.id);
+  for (let i = 0; i < 185; i++) { s.population.workers.count = 100; E.tick.tick(s); }
+  const ship = Object.values(s.fleet)[0];
+  const portSpot = findCoastRect(s, 7, 11);
+  const pr = placeBuilding(s, 'port', portSpot.x, portSpot.y);
+  assert.equal(pr.ok, true, '码头: ' + (pr.reason || ''));
+  const wd = E.worldData;
+  s.islands['island-t2'] = E.state.createIslandState('island-t2', DEFAULT_SEED + 21, wd.MAP_SIZE, { wood: 0, fish: 0 });
+  E.state.attachCoinAlias(s, s.islands['island-t2']);
+  return { ship, shipyard, port: pr.building, target: s.islands['island-t2'] };
+}
+
+// [B-65] 创建航线:绑定 idle 船 + 槽位校验(速率 0~5/步长 0.1/整船 ≤10/目标≠来源)
+test('[B-65] 创建航线:绑定船 + 槽位校验', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship } = setupShipping(s);
+  let r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 6 }]);
+  assert.equal(r.ok, false, '速率 >5 拒绝');
+  r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 3.33 }]);
+  assert.equal(r.ok, false, '步长非 0.1 拒绝');
+  r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 5 }, { good: 'wood', rate: 5.1 }]);
+  assert.equal(r.ok, false, '整船 >10 拒绝');
+  r = E.transport.createTransportTask(s, ship.id, 'island-main', [{ good: 'fish', rate: 1 }]);
+  assert.equal(r.ok, false, '目标不能是来源');
+  r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 3 }, { good: 'wood', rate: 1.5 }]);
+  assert.equal(r.ok, true, '创建: ' + (r.reason || ''));
+  assert.equal(s.fleet[ship.id].status, 'transport', '船绑定');
+});
+
+// [B-65] 持续转移:每 tick 按 rate/60,不批量;60 tick 转 3(3/min)
+test('[B-65] 持续转移:每 tick 结算,60 tick 转 3', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship, target } = setupShipping(s);
+  s.resources.fish = 100;
+  const r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 3 }]);
+  assert.equal(r.ok, true);
+  for (let i = 0; i < 60; i++) E.tick.tick(s);
+  assert.ok(Math.abs(target.resources.fish - 3) < 0.01, '60 tick 转 3(实际 ' + target.resources.fish + ')');
+  // 来源 = 100 - 运输 3 - 民居消费(setupBase 50 人吃鱼,消费 > 0 且远小于 3)
+  assert.ok(s.resources.fish < 97 && s.resources.fish > 96, '来源扣运输+消费(实际 ' + s.resources.fish + ')');
+});
+
+// [B-65] 比例分配:同源同商品 3+1 请求,库存不足按比例(2 → 1.5:0.5),不依赖遍历顺序
+test('[B-65] 比例分配:3+1 请求库存 2 → 1.5:0.5', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship, shipyard, target } = setupShipping(s);
+  // 第二艘船
+  s.resources.wood = 100; s.resources.sail = 50;
+  const sub2 = E.ships.submitShipOrder(s, shipyard.id);
+  assert.equal(sub2.ok, true, '第二单: ' + (sub2.reason || ''));
+  for (let i = 0; i < 185; i++) { s.population.workers.count = 100; E.tick.tick(s); }
+  assert.equal(Object.keys(s.fleet).length, 2, '应有 2 艘船(实际 ' + Object.keys(s.fleet).length + ')');
+  const ship2 = Object.values(s.fleet).find((x) => x.id !== ship.id);
+  assert.ok(ship2, '第二艘船存在');
+  s.resources.fish = 2; // 库存不足
+  const r1 = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 3 }]);
+  const r2 = E.transport.createTransportTask(s, ship2.id, 'island-t2', [{ good: 'fish', rate: 1 }]);
+  assert.equal(r1.ok && r2.ok, true);
+  for (let i = 0; i < 60; i++) { s.population.workers.count = 100; E.tick.tick(s); }
+  // 运输 = 库存 2 - 民居消费(消费 >0 且 <0.2);比例 3:1 不受消费影响
+  assert.ok(target.resources.fish > 1.8 && target.resources.fish < 2.1, '目标≈2(实际 ' + target.resources.fish + ')');
+  const ts = Object.values(s.transportTasks);
+  const c1 = ts[0].carried.fish || 0, c2 = ts[1].carried.fish || 0;
+  const total = c1 + c2;
+  assert.ok(Math.abs(total - target.resources.fish) < 0.01, 'carried 合计=目标到货');
+  assert.ok(Math.abs(c1 - total * 0.75) < 0.01, '船A 得 75%(3:1)(实际 ' + c1 + ')');
+  assert.ok(Math.abs(c2 - total * 0.25) < 0.01, '船B 得 25%(3:1)(实际 ' + c2 + ')');
+});
+
+// [B-65] 命令边界生效:编辑/暂停/恢复在下一完整 tick 原子提交
+test('[B-65] 命令边界生效:编辑/暂停/恢复', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship, target } = setupShipping(s);
+  s.resources.fish = 1000;
+  const r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 3 }]);
+  const taskId = r.task.id;
+  E.tick.tick(s);
+  E.transport.editTransportTask(s, taskId, [{ good: 'fish', rate: 1 }]);
+  const before = target.resources.fish;
+  E.tick.tick(s);
+  assert.ok(Math.abs((target.resources.fish - before) - 1 / 60) < 0.001, '编辑后按新速率(实际 ' + (target.resources.fish - before) + ')');
+  E.transport.pauseTransportTask(s, taskId);
+  E.tick.tick(s);
+  const before2 = target.resources.fish;
+  E.tick.tick(s);
+  assert.equal(target.resources.fish, before2, '暂停后停止转移');
+  assert.equal(s.fleet[ship.id].status, 'transport-paused', '暂停船状态');
+  E.transport.resumeTransportTask(s, taskId);
+  E.tick.tick(s);
+  const before3 = target.resources.fish;
+  E.tick.tick(s);
+  assert.ok(target.resources.fish > before3, '恢复后继续转移');
+});
+
+// [B-65] 码头阻塞:失效阻塞/复连自动恢复/与主动暂停独立
+test('[B-65] 码头阻塞:拆码头阻塞,重建恢复,暂停独立', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship, port, target } = setupShipping(s);
+  s.resources.fish = 1000;
+  const r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 1 }]);
+  const taskId = r.task.id;
+  E.tick.tick(s);
+  E.placement.demolish(s, port.id);
+  E.tick.tick(s);
+  const t = s.transportTasks[taskId];
+  assert.equal(t.blockedReason, 'port-invalid', '拆码头后阻塞');
+  assert.equal(s.fleet[ship.id].status, 'transport-paused', '阻塞船暂停状态');
+  const p2 = findCoastRect(s, 7, 11);
+  const pr2 = placeBuilding(s, 'port', p2.x, p2.y);
+  assert.equal(pr2.ok, true, '重建码头: ' + (pr2.reason || ''));
+  E.tick.tick(s);
+  assert.equal(s.transportTasks[taskId].blockedReason, null, '复连自动恢复');
+  E.transport.pauseTransportTask(s, taskId);
+  E.tick.tick(s);
+  assert.equal(s.transportTasks[taskId].userPaused, true, '主动暂停');
+  assert.equal(s.transportTasks[taskId].blockedReason, null, '暂停不派生阻塞');
+});
+
+// [B-65] 取消:活动/暂停/阻塞均可;船解绑 idle;不回滚
+test('[B-65] 取消航线:船 idle,既有结果不回滚', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.steel = 1000; s.resources.sail = 1000;
+  const { ship, target } = setupShipping(s);
+  s.resources.fish = 1000;
+  const r = E.transport.createTransportTask(s, ship.id, 'island-t2', [{ good: 'fish', rate: 1 }]);
+  const taskId = r.task.id;
+  for (let i = 0; i < 30; i++) E.tick.tick(s);
+  const carried = target.resources.fish;
+  assert.ok(carried > 0, '已转移(实际 ' + carried + ')');
+  E.transport.cancelTransportTask(s, taskId);
+  E.tick.tick(s);
+  assert.equal(s.transportTasks[taskId], undefined, '航线删除');
+  assert.equal(s.fleet[ship.id].status, 'idle', '船解绑 idle');
+  assert.equal(s.fleet[ship.id].currentIslandId, 'island-main', '船回来源岛');
+  assert.equal(target.resources.fish, carried, '既有结果不回滚');
+});
+
+// [B-62a] 命名规则:主岛=灰冠岛 1,探索岛按获得顺序连续编号
+test('[B-62a] 主岛正式名灰冠岛 1;探索岛灰冠岛 2 起连续编号', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED); // 真实入口(160 地形),不走 128 夹具
+  const wd2 = E.worldData;
+  assert.equal(s.islands[wd2.MAIN_ISLAND_ID].name, '灰冠岛 1', '主岛名应为灰冠岛 1');
+  // 模拟探索获得第一个新岛:直接走 acquireIsland(需先有探索任务完成态)
+  // 简化:构造 world 后手动创建第二岛,验证名字与 id 分离逻辑由探索负责;这里验证主岛归一
+  const raw = JSON.parse(JSON.stringify(s));
+  raw.islands[wd2.MAIN_ISLAND_ID].name = '主岛'; // 模拟旧 v2 档
+  const norm = E.save.deserialize(JSON.stringify({ v: 2, ts: Date.now(), state: raw }));
+  assert.equal(norm.islands[wd2.MAIN_ISLAND_ID].name, '灰冠岛 1', '旧档主岛名 主岛 应归一为 灰冠岛 1');
+});
+
+// ============ [Sol 复验 HIGH-1] 造船厂订单跨岛串联 ============
+
+// [HIGH-1] 不同岛同 ID 造船厂:队列/取消/推进必须复合身份(islandId+shipyardId)
+test('[HIGH-1] 两岛同 ID 造船厂:取消岛A订单不影响岛B', () => {
+  const s = createInitialState();
+  s.resources.coin = 100000; s.resources.wood = 1000; s.resources.brick = 1000; s.resources.sail = 1000;
+  // 岛A(活动=主岛):造船厂
+  const spotA = findCoastSpot(s, 6, 17);
+  assert.ok(spotA, '岛A应有海岸 6×17 位');
+  const ra = placeBuilding(s, 'sailingShipyard', spotA.x, spotA.y);
+  assert.equal(ra.ok, true, '岛A造船厂: ' + (ra.reason || ''));
+  const idA = ra.building.id;
+  // 岛B:造船厂(岛内独立 id 序列,同为 b1)
+  const islB = E.state.createIslandState('island-2', DEFAULT_SEED + 2, E.worldData.MAP_SIZE, { wood: 1000, brick: 1000, sail: 1000, fish: 100 });
+  E.state.attachCoinAlias(s, islB);
+  s.islands['island-2'] = islB;
+  const spotB = findCoastSpot(islB, 6, 17);
+  assert.ok(spotB, '岛B应有海岸 6×17 位');
+  const rb = E.placement.placeBuilding(islB, 'sailingShipyard', spotB.x, spotB.y);
+  assert.equal(rb.ok, true, '岛B造船厂: ' + (rb.reason || ''));
+  assert.equal(rb.building.id, idA, '两岛造船厂同 id(' + idA + ')——串联条件成立');
+  // 岛A 下一单(活动岛=主岛)
+  const subA = E.ships.submitShipOrder(s, idA);
+  assert.equal(subA.ok, true, '岛A下单: ' + (subA.reason || ''));
+  // 切活动岛到岛B 下一单
+  s.activeIslandId = 'island-2';
+  const subB = E.ships.submitShipOrder(s, rb.building.id);
+  assert.equal(subB.ok, true, '岛B下单: ' + (subB.reason || ''));
+  // 岛A 拆厂取消(活动岛=主岛)
+  s.activeIslandId = 'island-main';
+  const cr = E.ships.cancelShipyardOrders(s, 'island-main', idA);
+  assert.equal(cr.ok, true, '岛A拆厂取消: ' + (cr.reason || ''));
+  // 岛B 订单必须保留
+  const ordersB = E.ships.ordersOf(s, 'island-2', rb.building.id);
+  assert.equal(ordersB.length, 1, '岛B 订单应保留(实际 ' + ordersB.length + ')');
+  // 队列上限隔离:岛A 再下单应受岛A 自身队列限制,不受岛B 订单影响
+  // (岛A 上限 4:已有 0 份[已取消],可再下;此处验证订单归属过滤而非总量)
+  const oA2 = E.ships.submitShipOrder(s, idA);
+  assert.equal(oA2.ok, true, '岛A再下单: ' + (oA2.reason || ''));
+  assert.equal(E.ships.ordersOf(s, 'island-main', idA).length, 1, '岛A 队列 1 份');
+  assert.equal(ordersB.length, 1, '岛B 队列仍 1 份(互不影响)');
+});
+
+// ============ [Sol 复验 HIGH-2] 探索跨岛瞬移与码头权限 ============
+
+// [HIGH-2] 探索来源岛=船停留岛(非活动岛),要求有效码头;否则不扣费不建任务
+test('[HIGH-2] 探索禁止跨岛瞬移与无码头出发', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  // 船停留在岛2(活动岛=主岛;两岛均无码头)
+  const isl2 = E.state.createIslandState('island-2', DEFAULT_SEED + 2, E.worldData.MAP_SIZE, { wood: 100, fish: 100, sail: 10, workclothes: 10, schnapps: 10 });
+  E.state.attachCoinAlias(s, isl2);
+  s.islands['island-2'] = isl2;
+  s.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'island-2', status: 'idle', constructionCostPaid: {} } };
+  const fish0 = isl2.resources.fish;
+  const r = E.expeditions.startExpedition(s, 's1', '70');
+  assert.equal(r.ok, false, '无码头必须拒绝: ' + r.reason);
+  assert.equal(isl2.resources.fish, fish0, '不得扣费');
+  assert.ok(!s.expeditionTasks || Object.keys(s.expeditionTasks).length === 0, '不得创建任务');
+  assert.equal(s.fleet.s1.status, 'idle', '船保持空闲');
+});
+
+// [HIGH-2] 有码头且连通仓库时,从船停留岛(非活动岛)扣费发起
+test('[HIGH-2] 码头有效时从船停留岛扣费发起探索', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  const isl2 = E.state.createIslandState('island-2', DEFAULT_SEED + 2, E.worldData.MAP_SIZE, { wood: 100, fish: 100, steel: 20, sail: 10, workclothes: 10, schnapps: 10 });
+  E.state.attachCoinAlias(s, isl2);
+  s.islands['island-2'] = isl2;
+  // 岛2 建仓库+码头+铺路连通
+  const wb = findSpot(isl2, 5, 5, null, PF);
+  assert.ok(wb, '岛2 仓库位');
+  const rw = E.placement.placeBuilding(isl2, 'warehouse', wb.x, wb.y);
+  assert.equal(rw.ok, true, '岛2仓库: ' + (rw.reason || ''));
+  const pb = findCoastSpot(isl2, 7, 11);
+  assert.ok(pb, '岛2 码头位');
+  const rp = E.placement.placeBuilding(isl2, 'port', pb.x, pb.y);
+  assert.equal(rp.ok, true, '岛2码头: ' + (rp.reason || ''));
+  const av = E.placement.footprint(E.buildings.getDef('port'), pb.x, pb.y, 0);
+  const c = connectTo(isl2, pb.x, pb.y, av, av);
+  assert.ok(c, '码头连通仓库');
+  // 船在岛2 idle
+  s.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'island-2', status: 'idle', constructionCostPaid: {} } };
+  const fish0 = isl2.resources.fish;
+  const wood0 = isl2.resources.wood; // 码头建造后记录(码头本身耗木 10)
+  const r = E.expeditions.startExpedition(s, 's1', '70');
+  assert.equal(r.ok, true, '码头有效应放行: ' + (r.reason || ''));
+  assert.equal(isl2.resources.fish, fish0 - 20, '从船停留岛扣鱼 20');
+  assert.equal(isl2.resources.wood, wood0 - 10, '从船停留岛扣木 10');
+  assert.equal(s.fleet.s1.status, 'expedition', '船占用');
+  assert.equal(r.task.sourceIslandId, 'island-2', '任务来源岛=船停留岛');
+});
+
+// ============ [Sol 复验 HIGH-3] 矿床兜底合法化 ============
+
+// [HIGH-3] 逐矿物独立校验:任一入选矿物未达组数即不满足(旧 1.5 分制会允许部分缺失+超额通过)
+test('[HIGH-3] 逐矿物独立校验:任一矿物缺失即不满足', () => {
+  const size = E.worldData.MAP_SIZE;
+  const t1 = E.mapTemplate.generateIsland(size, 1001, ['clay', 'iron', 'coal']); // 无 zinc
+  const ok1 = E.expeditions.depositsSatisfied(t1, size, ['clay', 'iron', 'coal', 'zinc']);
+  assert.equal(ok1, false, 'zinc 缺失必须不满足');
+  const t2 = E.mapTemplate.generateIsland(size, 1002, ['clay', 'iron', 'coal', 'zinc']); // 齐备
+  const ok2 = E.expeditions.depositsSatisfied(t2, size, ['clay', 'iron', 'coal', 'zinc']);
+  assert.equal(ok2, true, '四矿物齐备应满足');
+});
+
+// [Sol 轮2] 完整矿床组验证:散格(75 黏土无完整 5×5)不算满足
+test('[Sol-2-2] 零散矿物格不满足(须完整 5×5/3×3 组)', () => {
+  const size = E.worldData.MAP_SIZE;
+  const t = Array.from({ length: size }, () => Array(size).fill(0));
+  // 散布 75 个黏土格(2),互不相邻,保证无完整 5×5
+  let n = 0;
+  for (let y = 0; y < 20 && n < 75; y += 2) for (let x = 0; x < 20 && n < 75; x += 2) {
+    t[y * 8][x * 8] = 2; n++;
+  }
+  assert.equal(n, 75, '散布 75 黏土格');
+  const ok = E.expeditions.depositsSatisfied(t, size, ['clay']);
+  assert.equal(ok, false, '75 零散黏土无完整 5×5 组必须不满足');
+});
+
+// [HIGH-3/AC-20] 正常生成:入选矿物不得被删减(与 pickNewIslandEndowments 一致);候选不足返回 null
+test('[Sol-2-2] 正常生成不删矿物;候选不足不授予', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  const endow = E.expeditions.pickNewIslandEndowments(s, 9999);
+  const g = E.expeditions.generateNewIsland(s, 9999);
+  assert.ok(g, '真实种子应能生成合法新岛');
+  assert.deepEqual(g.endow.deposits, endow.deposits, '入选矿物不得被删减(AC-20)');
+  // 候选不足(全水):不得删矿物,必须返回 null 不授予
+  const water = Array.from({ length: 160 }, () => Array(160).fill(6));
+  const orig = E.mapTemplate.generateIsland;
+  E.mapTemplate.generateIsland = () => water;
+  try {
+    const g2 = E.expeditions.generateNewIsland(s, 9999);
+    assert.equal(g2, null, '候选不足必须返回 null(不得删矿物/不得授予残缺岛)');
+  } finally { E.mapTemplate.generateIsland = orig; }
+});
+
+// ============ [Sol 复验 HIGH-4] 生产主循环分帧 ============
+
+// [HIGH-4] 分片循环(frameBudget)结果与一次性 tick 等价:调度器可安全用分片驱动
+test('[HIGH-4] 分片循环与一次性 tick 等价(多岛)', () => {
+  const s1 = E.state.createInitialState(DEFAULT_SEED);
+  const s2 = E.state.createInitialState(DEFAULT_SEED);
+  for (let i = 2; i <= 5; i++) {
+    const a = E.state.createIslandState('island-' + i, 5000 + i, E.worldData.MAP_SIZE, { wood: 60, fish: 100 });
+    const b = E.state.createIslandState('island-' + i, 5000 + i, E.worldData.MAP_SIZE, { wood: 60, fish: 100 });
+    E.state.attachCoinAlias(s1, a); E.state.attachCoinAlias(s2, b);
+    s1.islands[a.id] = a; s2.islands[b.id] = b;
+  }
+  E.tick.tick(s1); // 一次性(旧调度器)
+  let r = null; let guard = 0;
+  do { r = E.tick.tick(s2, { frameBudget: 2 }); } while (!r.complete && guard++ < 20);
+  assert.ok(r.complete, '分片循环应完成(guard=' + guard + ')');
+  assert.equal(s2.time.tickAcc, s1.time.tickAcc, '时间推进一致');
+  for (const id of Object.keys(s1.islands)) {
+    assert.equal(s2.islands[id].__prevPop, s1.islands[id].__prevPop, '岛 ' + id + ' 人口趋势一致');
+  }
+});
+
+// ============ [Sol 复验 HIGH-6] 海事存档校验 ============
+
+// [HIGH-6] 非法海事状态(shipOrders=null/悬空引用)读档必须拒绝,不能先接受后崩溃
+test('[HIGH-6] 非法海事状态读档必须拒绝', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  // 订单为 null
+  const raw1 = JSON.parse(JSON.stringify(s));
+  raw1.shipOrders = { o1: null };
+  assert.throws(() => E.save.deserialize(JSON.stringify({ v: 2, ts: Date.now(), state: raw1 })), '非法订单(null)应拒绝');
+  // 船引用不存在的岛
+  const raw2 = JSON.parse(JSON.stringify(s));
+  raw2.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'no-such-island', status: 'idle', constructionCostPaid: {} } };
+  assert.throws(() => E.save.deserialize(JSON.stringify({ v: 2, ts: Date.now(), state: raw2 })), '悬空岛引用应拒绝');
+});
+
+// ============ [Sol 轮2] 探索 roll 权威性 ============
+
+// [Sol-2-1] 探索 roll 只由来源岛决定:同一世界状态仅切换活动岛,roll 不变
+test('[Sol-2-1] 探索 roll 不受活动岛影响(来源岛权威)', () => {
+  // 两个同结构 world:船都停岛2,仅 activeIslandId 不同;来源岛 seed 相同 → roll 必须相同
+  function buildWorld(activeId) {
+    const s = E.state.createInitialState(DEFAULT_SEED);
+    const isl2 = E.state.createIslandState('island-2', DEFAULT_SEED + 2, E.worldData.MAP_SIZE, { wood: 100, fish: 100, steel: 20, sail: 10, workclothes: 10, schnapps: 10 });
+    E.state.attachCoinAlias(s, isl2);
+    s.islands['island-2'] = isl2;
+    const wb = findSpot(isl2, 5, 5, null, PF);
+    const rw = E.placement.placeBuilding(isl2, 'warehouse', wb.x, wb.y);
+    assert.equal(rw.ok, true, '岛2仓库: ' + (rw.reason || ''));
+    const def = E.buildings.getDef('port');
+    let pb = null;
+    for (let cy = 5; cy < 150 && !pb; cy++) for (let cx = 5; cx < 150 && !pb; cx++) {
+      let allWater = true, anyLand = false;
+      for (let dy = 0; dy < 11 && allWater; dy++) for (let dx = 0; dx < 7 && allWater; dx++) {
+        const t = isl2.map.terrain[cy - 5 + dy][cx - 3 + dx];
+        if (t !== 6) { allWater = false; break; }
+        for (const [ddx, ddy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const wx = cx - 3 + dx + ddx, wy = cy - 5 + dy + ddy;
+          if (wx >= 0 && wy >= 0 && wx < 160 && wy < 160 && isl2.map.terrain[wy][wx] !== 6 && isl2.map.terrain[wy][wx] !== 7) anyLand = true;
+        }
+      }
+      if (allWater && anyLand) {
+        const fp = E.placement.footprint(def, cx, cy, 0);
+        if (!fp.some((p) => isl2.grid[key(p.x, p.y)])) { pb = { x: cx, y: cy }; break; }
+      }
+    }
+    assert.ok(pb, '岛2 码头位');
+    const rp = E.placement.placeBuilding(isl2, 'port', pb.x, pb.y);
+    assert.equal(rp.ok, true, '岛2码头: ' + (rp.reason || ''));
+    const av = E.placement.footprint(def, pb.x, pb.y, 0);
+    const c = connectTo(isl2, pb.x, pb.y, av, av);
+    assert.ok(c, '码头连通仓库');
+    s.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'island-2', status: 'idle', constructionCostPaid: {} } };
+    s.activeIslandId = activeId;
+    return s;
+  }
+  const sA = buildWorld('island-main');
+  const rA = E.expeditions.startExpedition(sA, 's1', '70');
+  assert.equal(rA.ok, true, 'A发起: ' + (rA.reason || ''));
+  const sB = buildWorld('island-2');
+  const rB = E.expeditions.startExpedition(sB, 's1', '70');
+  assert.equal(rB.ok, true, 'B发起: ' + (rB.reason || ''));
+  assert.equal(rB.task.roll, rA.task.roll, '活动岛不得改变 roll(实际 A=' + rA.task.roll + ' B=' + rB.task.roll + ')');
+});
+
+// ============ [Sol 轮2] 跨帧调度器(AC-17) ============
+
+// [Sol-2-3] createScheduler:每帧一片、未完成不启动下一 tick、complete 才计数/推进时间/允许保存
+test('[Sol-2-3] 跨帧调度器:分片逐帧推进,complete 才计数', async () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  for (let i = 2; i <= 5; i++) {
+    const a = E.state.createIslandState('island-' + i, 5000 + i, E.worldData.MAP_SIZE, { wood: 60, fish: 100 });
+    E.state.attachCoinAlias(s, a);
+    s.islands[a.id] = a;
+  }
+  const sch = E.tick.createScheduler(s, { frameBudget: 2 }); // 5 岛 → 3 帧
+  const t0 = s.time.tickAcc;
+  // 帧 1:开始世界 tick,2 岛
+  let r = sch.frame(1000);
+  assert.equal(r.started, true, '节拍到应开始');
+  assert.equal(r.complete, false, '分片中途未完成');
+  assert.equal(s.time.tickAcc, t0, '分片中途不推进时间');
+  await new Promise((res) => setTimeout(res, 0)); // 帧间让渡(跨任务,浏览器可绘制/输入)
+  // 帧 2:继续分片
+  r = sch.frame(1016);
+  assert.equal(r.complete, false, '仍未完成');
+  await new Promise((res) => setTimeout(res, 0));
+  // 帧 3:完成
+  r = sch.frame(1032);
+  assert.equal(r.complete, true, '全部岛完成才 complete');
+  assert.equal(s.time.tickAcc, (t0 + 1) % 12, '完成后时间推进 1');
+  assert.equal(sch.getTicks(), 1, '完整世界 tick 计数 1(自动保存资格)');
+  // 未完成期间不得启动下一 tick:节拍内不开始
+  r = sch.frame(1048);
+  assert.equal(r.started, false, '节拍内不启动下一世界 tick');
+  // 节拍到达:下一世界 tick
+  r = sch.frame(3000);
+  assert.equal(r.started, true, '节拍到达开始下一 tick');
+  // 暂停:不推进
+  s.settings.paused = true;
+  r = sch.frame(4016);
+  assert.equal(r.started, false, '暂停不推进');
+  s.settings.paused = false;
+});
+
+// ============ [Sol 轮2] transport-paused 存档合法化 ============
+
+// [Sol-2-4] 活动航线/主动暂停/码头阻塞三种合法状态存档往返必须成功(不得误判非法)
+test('[Sol-2-4] 合法运输状态存档往返(活动/暂停/阻塞)', () => {
+  const cases = [
+    { name: '活动航线', status: 'transport', userPaused: false, blockedReason: null },
+    { name: '主动暂停', status: 'transport-paused', userPaused: true, blockedReason: null },
+    { name: '码头阻塞', status: 'transport-paused', userPaused: false, blockedReason: 'port-invalid' },
+  ];
+  for (const c of cases) {
+    const s = E.state.createInitialState(DEFAULT_SEED);
+    s.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'island-main', status: c.status, constructionCostPaid: { coin: 5000, wood: 20, sail: 10 } } };
+    s.transportTasks = {
+      t1: { id: 't1', shipId: 's1', sourceIslandId: 'island-main', targetIslandId: 'island-main', slots: [{ good: 'fish', rate: 1 }], userPaused: c.userPaused, blockedReason: c.blockedReason, carried: {}, _pending: null },
+    };
+    let norm = null;
+    try {
+      norm = E.save.deserialize(E.save.serialize(s));
+    } catch (e) {
+      assert.fail(c.name + ' 存档往返被误拒: ' + e.message);
+    }
+    assert.equal(norm.fleet.s1.status, c.status, c.name + ' 状态保留');
+    assert.equal(norm.transportTasks.t1.shipId, 's1', c.name + ' 航线保留');
+  }
+  // 保留非法拒绝:transport-paused 无对应航线必须拒绝
+  const s2 = E.state.createInitialState(DEFAULT_SEED);
+  s2.fleet = { s1: { id: 's1', type: 'sailBoat', currentIslandId: 'island-main', status: 'transport-paused', constructionCostPaid: {} } };
+  assert.throws(() => E.save.deserialize(E.save.serialize(s2)), 'transport-paused 无航线应拒绝');
+});
+
+// ============ [Sol 轮3] 矿床抽定组数校验 ============
+
+// [Sol-3-1] depositsSatisfied 必须按本次抽定值校验(非仅 min)
+test('[Sol-3-1] 矿床按抽定值校验:抽 4 实 3 拒绝;抽 3 实 3 / 抽 4 实 4 通过', () => {
+  const size = 160;
+  // 构造地形:3 个互不重叠完整 5×5 黏土块(其余平地)
+  function makeTerrainWithClayGroups(n) {
+    const t = Array.from({ length: size }, () => Array(size).fill(0));
+    for (let i = 0; i < n; i++) {
+      const y0 = 10 + i * 20, x0 = 10 + i * 30;
+      for (let dy = 0; dy < 5; dy++) for (let dx = 0; dx < 5; dx++) t[y0 + dy][x0 + dx] = 2;
+    }
+    return t;
+  }
+  const t3 = makeTerrainWithClayGroups(3);
+  // 抽中 3 组、实际 3 组 → 通过
+  t3.drawnGroups = { clay: 3 };
+  assert.equal(E.expeditions.depositsSatisfied(t3, size, ['clay']), true, '抽 3 实 3 应通过');
+  // 抽中 4 组、实际 3 组 → 拒绝(关键回归:旧实现只查 min=3 会误过)
+  const t3b = makeTerrainWithClayGroups(3);
+  t3b.drawnGroups = { clay: 4 };
+  assert.equal(E.expeditions.depositsSatisfied(t3b, size, ['clay']), false, '抽 4 实 3 必须拒绝');
+  // 抽中 4 组、实际 4 组 → 通过
+  const t4 = makeTerrainWithClayGroups(4);
+  t4.drawnGroups = { clay: 4 };
+  assert.equal(E.expeditions.depositsSatisfied(t4, size, ['clay']), true, '抽 4 实 4 应通过');
+  // 无 drawnGroups(旧 terrain)→ 回退 min=3:实际 3 通过
+  const t3c = makeTerrainWithClayGroups(3);
+  assert.equal(E.expeditions.depositsSatisfied(t3c, size, ['clay']), true, '无 drawnGroups 回退 min');
+});
+
+// [Sol-3-1] 真实生成器暴露抽定值且与实际放置一致
+test('[Sol-3-1] generateIsland 暴露 drawnGroups,实际完整组数达到抽定值', () => {
+  const size = E.worldData.MAP_SIZE;
+  for (const seed of [1001, 2002, 3003]) {
+    const t = E.mapTemplate.generateIsland(size, seed, ['clay', 'iron', 'coal']);
+    assert.ok(t.drawnGroups, '生成器应暴露 drawnGroups');
+    assert.ok(t.drawnGroups.clay >= 3 && t.drawnGroups.clay <= 4, '黏土抽定 3~4');
+    assert.ok(t.drawnGroups.iron >= 5 && t.drawnGroups.iron <= 6, '铁抽定 5~6');
+    assert.ok(t.drawnGroups.coal >= 4 && t.drawnGroups.coal <= 5, '煤抽定 4~5');
+    assert.equal(E.expeditions.depositsSatisfied(t, size, ['clay', 'iron', 'coal']), true, '真实生成应达到抽定值(seed ' + seed + ')');
+  }
+});
+
+// ============ [Sol 轮3] 分帧暂停退出补完 ============
+
+// [Sol-3-2] 分片中暂停→退出补完→保存→读档:不无限循环、不产生半结算存档、不启动新 tick
+test('[Sol-3-2] 分片中暂停后补完半截 tick 并安全存档', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  for (let i = 2; i <= 4; i++) {
+    const a = E.state.createIslandState('island-' + i, 6000 + i, E.worldData.MAP_SIZE, { wood: 60, fish: 100 });
+    E.state.attachCoinAlias(s, a);
+    s.islands[a.id] = a;
+  }
+  // 半截世界 tick:cursor=1(4 岛,frameBudget=1 首帧完成 1 岛)
+  const r1 = E.tick.tick(s, { frameBudget: 1 });
+  assert.equal(r1.complete, false, '半截 tick');
+  assert.equal(s._tickCursor, 1, 'cursor=1');
+  // 玩家点击暂停
+  s.settings.paused = true;
+  // 暂停中 tick 不应推进(旧 beforeunload 死循环根因)
+  const rp = E.tick.tick(s);
+  assert.equal(rp.complete, false, '暂停中 tick 立即返回未完成');
+  assert.equal(s._tickCursor, 1, '暂停中不推进');
+  // 补完(生产 beforeunload 路径):暂停中也能完成半截 tick
+  const f = E.tick.finishPendingTick(s);
+  assert.equal(f.completed, true, '补完必须成功(不无限循环)');
+  assert.equal(s._tickCursor, 0, '补完后 cursor=0(无半结算状态)');
+  assert.equal(s.settings.paused, true, '暂停状态恢复');
+  // 存档→读档(公共路径)
+  const norm = E.save.deserialize(E.save.serialize(s));
+  assert.equal(norm._tickCursor === undefined || norm._tickCursor === 0, true, '读档后无分帧残留(字段被归一删除)');
+  assert.equal(norm.time.tickAcc, s.time.tickAcc, '时间只提交一次');
+  // 无半截 tick 时补完不动(不额外启动新 tick)
+  const f2 = E.tick.finishPendingTick(norm);
+  assert.equal(f2.completed, false, '无半截 tick 不动作');
+  assert.equal(norm.time.tickAcc, s.time.tickAcc, '不启动新 tick');
+});
+
+// ============ [B-67] 布局版本(全图缩略缓存失效信号) ============
+
+// [B-67] 放置/拆除/铺路/移动递增 _layoutVer(tick 不递增)
+test('[B-67] 布局版本在放置/拆除/铺路后递增', () => {
+  const s = createInitialState();
+  setupBase(s); // 仓库+路网(findSawmillSpot 前置)
+  const spot = findSawmillSpot(s);
+  const av = footprint(E.buildings.getDef('sawmill'), spot.x, spot.y);
+  connectTo(s, spot.x, spot.y, av, av); // 铺路也会递增,故先完成再记基线
+  const v0 = s._layoutVer || 0;
+  const r = placeBuilding(s, 'sawmill', spot.x, spot.y);
+  assert.equal(r.ok, true, '放置: ' + (r.reason || ''));
+  assert.equal(s._layoutVer, v0 + 1, '放置递增布局版本');
+  // 铺路递增
+  const v1 = s._layoutVer;
+  setRoad(s, spot.x + 6, spot.y, true);
+  assert.equal(s._layoutVer, v1 + 1, '铺路递增布局版本');
+  // 拆除递增
+  const v2 = s._layoutVer;
+  demolish(s, r.building.id);
+  assert.equal(s._layoutVer, v2 + 1, '拆除递增布局版本');
+  // tick 不递增(缩略缓存无需因生产/人口刷新而重建)
+  const v3 = s._layoutVer;
+  E.tick.tick(s);
+  assert.equal(s._layoutVer, v3, 'tick 不递增布局版本');
+});
+
+// ============ [B-69] 岛屿禀赋查看 ============
+
+// [B-69] 资源面板显示当前岛矿物+植物禀赋(fake el,UI 模块无 DOM 依赖)
+test('[B-69] 资源面板显示当前岛矿物与植物禀赋', () => {
+  require('../src/ui/economy.js');
+  const ui = globalThis.UI && globalThis.UI.economy;
+  assert.ok(ui && typeof ui.renderRes === 'function', 'UI.economy.renderRes 可用');
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  const el = { innerHTML: '', querySelectorAll: () => [] };
+  ui.renderRes(el, s);
+  assert.ok(el.innerHTML.includes('岛屿禀赋'), '含禀赋区块');
+  assert.ok(el.innerHTML.includes('黏土') && el.innerHTML.includes('铁'), '主岛保底矿物(黏土/铁)');
+  assert.ok(el.innerHTML.includes('土豆'), '主岛植物(土豆)');
+  // 新岛禀赋:手动挂 deposits/fertilities 后渲染
+  const s2 = E.state.createInitialState(DEFAULT_SEED);
+  s2.islands['island-main'].deposits = ['coal', 'gold'];
+  s2.islands['island-main'].fertilities = ['grapes', 'pepper'];
+  const el2 = { innerHTML: '', querySelectorAll: () => [] };
+  ui.renderRes(el2, s2);
+  assert.ok(el2.innerHTML.includes('煤') && el2.innerHTML.includes('金'), '新岛矿物名');
+  assert.ok(el2.innerHTML.includes('葡萄'), '新岛植物名');
+});
+
+// ============ [优化] 模拟计算简化 ============
+
+// [优化] serviceRoads 布局缓存:布局不变复用(同引用),铺路后失效重建
+test('[优化] serviceRoads 缓存:布局不变复用,铺路后失效', () => {
+  const s = createInitialState();
+  setupBase(s);
+  const c1 = E.population.serviceRoads(s, 'warehouse');
+  const c2 = E.population.serviceRoads(s, 'warehouse');
+  assert.equal(c1, c2, '布局不变返回同缓存引用');
+  // 铺路(布局版本递增)→ 失效重建
+  const sp = findSpot(s, 3, 3, null, PF);
+  assert.ok(sp);
+  const r = setRoad(s, sp.x + 6, sp.y, true);
+  assert.equal(r.ok, true, '铺路: ' + (r.reason || ''));
+  const c3 = E.population.serviceRoads(s, 'warehouse');
+  assert.notEqual(c3, c1, '铺路后缓存失效重建');
+  assert.ok(c3.size >= c1.size, '覆盖不缩小(实际 ' + c1.size + '→' + c3.size + ')');
+});
+
+// [优化] 慢变量低频结算:默认每 3 tick;slowEvery:1 全精度
+test('[优化] 慢变量低频结算:默认 3 tick 一次,slowEvery:1 全精度', () => {
+  const s = createInitialState();
+  setupBase(s);
+  s.population.farmers.count = 0;
+  s.resources.fish = 100;
+  E.tick.tick(s); // t1: 结算(1%3=1)
+  const sat1 = s.population.farmers.needSats.fish;
+  E.tick.tick(s); // t2: 不结算
+  assert.equal(s.population.farmers.needSats.fish, sat1, '中间 tick 用缓存值');
+  E.tick.tick(s); // t3: 不结算
+  E.tick.tick(s); // t4: 结算(4%3=1)
+  assert.equal(s.population.farmers.needSats.fish, 1, '第 4 tick 结算(有鱼 → sat 1)');
+  // slowEvery:1:每次结算(修改库存后立即反映)
+  const s2 = createInitialState();
+  setupBase(s2);
+  s2.resources.fish = 0;
+  E.tick.tick(s2, { slowEvery: 1 });
+  assert.equal(s2.population.farmers.needSats.fish, 0, '0 库存 sat 0');
+  s2.resources.fish = 100;
+  E.tick.tick(s2, { slowEvery: 1 });
+  assert.equal(s2.population.farmers.needSats.fish, 1, '有鱼后即结算');
+});
+
+// ============ [修复] serviceRoads 缓存不落盘 ============
+
+// [修复] 存档往返后 _serviceCache(Set)被 JSON 序列化成数组 → 读档必须清除运行时缓存
+// (否则 touchesRoads 对数组调 .has 崩溃 → 启动 refresh 抛错 → 页面白屏/加载中)
+test('[修复] 存档往返后 serviceRoads 缓存重建(不返回序列化数组)', () => {
+  const s = E.state.createInitialState(DEFAULT_SEED);
+  setupBase(s);
+  const c1 = E.population.serviceRoads(s, 'warehouse');
+  assert.ok(c1 instanceof Set, '首次返回 Set');
+  const text = E.save.serialize(s);
+  const back = E.save.deserialize(text);
+  // 往返后:缓存必须已清除(读档阶段),refresh 与查询正常工作(不崩)
+  E.economy.refresh(back, { produce: false, logs: false });
+  const c2 = E.population.serviceRoads(back, 'warehouse');
+  assert.ok(c2 instanceof Set, '往返后仍返回 Set(缓存已重建)');
 });

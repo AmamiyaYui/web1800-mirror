@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>蒸汽都市</title>
-  <link rel="stylesheet" href="style.css?v=129">
+  <link rel="stylesheet" href="style.css?v=184">
 </head>
 <body>
   <!-- [V1.5] 背景底:地图画布铺满全窗,支持右键拖拽平移视野 -->
@@ -28,6 +28,12 @@
     <div class="top-section" id="time-sec">
       <span class="zone-label">📅 时间</span>
       <span id="time-display">第 1 天 00:00</span>
+    </div>
+    <!-- [B-62] 当前岛下拉 + 世界航图入口(REQ-33) -->
+    <div class="top-section" id="island-sec">
+      <span class="zone-label">🏝️ 岛屿</span>
+      <select id="island-select" title="当前岛屿"></select>
+      <button id="btn-atlas" class="mini-btn">🗺️ 航图</button>
     </div>
     <div class="top-section" id="info-sec">
       <span class="zone-label">📋 信息</span>
@@ -165,6 +171,13 @@
       </div>
     </div>
   </div>
+  <!-- [B-62] 世界航图骨架:岛屿列表(REQ-33;舰队/运输/探索入口由 B-63~65 填充) -->
+  <div id="atlas-overlay" class="overlay hidden">
+    <div class="overlay-box atlas-box"> <!-- [B-68] 航图专用加宽容器 -->
+      <div class="overlay-title">🗺️ 世界航图 <button id="btn-atlas-close" class="mini-btn">✕</button></div>
+      <div id="atlas-islands" class="atlas-list"></div>
+    </div>
+  </div>
 
   <!-- [V1.10 修订⑤ 顺序20] 打赏弹窗 + 留言板 -->
   <div id="donate-overlay" class="overlay hidden">
@@ -210,7 +223,7 @@
           <div class="welcome-step">② <strong>铺路</strong>连接(土路 3/格)——建筑连上仓库的路,才算连通喵</div>
           <div class="welcome-step">③ 建<strong>民居</strong>与<strong>渔场</strong>——满足居民需求(市场/鱼/工作服),人口涨到 50 就能解锁工人喵</div>
         </div>
-        <div class="welcome-hint">操作方式(查看/铺路/拆除/R 旋转/滚轮缩放)和游戏信息(📖 机制速览 / 📊 生产链 / 🎨 图例)都在<strong>上边栏</strong>,随时可看~</div>
+        <div class="welcome-hint">操作方式(查看/铺路/拆除/R 旋转/滚轮缩放;右键拖动或 WASD/方向键平移视野)和游戏信息(📖 机制速览 / 📊 生产链 / 🎨 图例)都在<strong>上边栏</strong>,随时可看~</div>
         <div class="welcome-dev">🔧 开发中版本,有建议 / 发现 BUG,欢迎到「💬 留言板」留言~</div>
         <div class="welcome-updates">
           <div class="welcome-updates-title">🆕 最近更新</div>
@@ -259,33 +272,38 @@
   </div>
 
   <!-- 引擎(加载顺序即依赖顺序) -->
-  <script src="src/engine/data/goods.js?v=129"></script>
-  <script src="src/engine/data/needs-data.js?v=129"></script>
-  <script src="src/engine/data/tiers.js?v=129"></script>
-  <script src="src/engine/data/buildings-data.js?v=129"></script>
-  <script src="src/engine/data/buildings.js?v=129"></script>
-  <script src="src/engine/data/map-template.js?v=129"></script>
-  <script src="src/engine/data/balance.js?v=129"></script>
-  <script src="src/engine/events.js?v=129"></script>
-  <script src="src/engine/state.js?v=129"></script>
-  <script src="src/engine/connectivity.js?v=129"></script>
-  <script src="src/engine/economy.js?v=129"></script>
-  <script src="src/engine/placement.js?v=129"></script>
-  <script src="src/engine/population.js?v=129"></script>
-  <script src="src/engine/goals.js?v=129"></script>
-  <script src="src/engine/chains.js?v=129"></script>
-  <script src="src/engine/tick.js?v=129"></script>
-  <script src="src/engine/save.js?v=129"></script>
+  <script src="src/engine/data/goods.js?v=184"></script>
+  <script src="src/engine/data/needs-data.js?v=184"></script>
+  <script src="src/engine/data/tiers.js?v=184"></script>
+  <script src="src/engine/data/buildings-data.js?v=184"></script>
+  <script src="src/engine/data/buildings.js?v=184"></script>
+  <script src="src/engine/data/map-template.js?v=184"></script>
+  <script src="src/engine/data/world-data.js?v=184"></script>
+  <script src="src/engine/data/ships-data.js?v=184"></script>
+  <script src="src/engine/data/balance.js?v=184"></script>
+  <script src="src/engine/events.js?v=184"></script>
+  <script src="src/engine/state.js?v=184"></script>
+  <script src="src/engine/connectivity.js?v=184"></script>
+  <script src="src/engine/economy.js?v=184"></script>
+  <script src="src/engine/placement.js?v=184"></script>
+  <script src="src/engine/ships.js?v=184"></script>
+  <script src="src/engine/explorations.js?v=184"></script>
+  <script src="src/engine/transport.js?v=184"></script>
+  <script src="src/engine/population.js?v=184"></script>
+  <script src="src/engine/goals.js?v=184"></script>
+  <script src="src/engine/chains.js?v=184"></script>
+  <script src="src/engine/tick.js?v=184"></script>
+  <script src="src/engine/save.js?v=184"></script>
   <!-- 渲染与 UI -->
-  <script src="src/render/map-renderer.js?v=129"></script>
-  <script src="src/ui/economy.js?v=129"></script>
-  <script src="src/ui/goal.js?v=129"></script>
-  <script src="src/ui/build-menu.js?v=129"></script>
-  <script src="src/ui/panels.js?v=129"></script>
-  <script src="src/ui/mode.js?v=129"></script>
-  <script src="src/ui/guide.js?v=129"></script>
-  <script src="src/ui/chains-panel.js?v=129"></script>
-  <script src="src/ui/minimap.js?v=129"></script>
-  <script src="src/main.js?v=129"></script>
+  <script src="src/render/map-renderer.js?v=184"></script>
+  <script src="src/ui/economy.js?v=184"></script>
+  <script src="src/ui/goal.js?v=184"></script>
+  <script src="src/ui/build-menu.js?v=184"></script>
+  <script src="src/ui/panels.js?v=184"></script>
+  <script src="src/ui/mode.js?v=184"></script>
+  <script src="src/ui/guide.js?v=184"></script>
+  <script src="src/ui/chains-panel.js?v=184"></script>
+  <script src="src/ui/minimap.js?v=184"></script>
+  <script src="src/main.js?v=184"></script>
 </body>
 </html>

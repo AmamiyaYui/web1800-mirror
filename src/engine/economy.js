@@ -7,6 +7,29 @@
   const events = root.Engine.events;
   // [顺序11] placement 在 economy 之后加载,须函数内引用 root.Engine.placement
 
+  // [用户决策] 民居接触任意道路即有效(不要求连仓库;生产建筑仍须连仓库物流)
+  // 接触判定:footprint 自身/4 邻有路,或接触仓库 footprint(仓库=基础设施接入点,原 isConnected 语义)
+  function touchesAnyRoad(state, b, def) {
+    const size = state.map.size;
+    const w = (def.size && def.size.w) || 1, h = (def.size && def.size.h) || 1;
+    const bx = Math.floor((w - 1) / 2), by = Math.floor((h - 1) / 2);
+    const isWarehouse = (x, y) => {
+      const occ = state.grid[x + ',' + y];
+      if (!occ) return false;
+      const od = getDef(state.buildings[occ].type);
+      return !!(od && od.special === 'warehouse');
+    };
+    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+      const x = b.x - bx + dx, y = b.y - by + dy;
+      if (state.roads[st.key(x, y)] || isWarehouse(x, y)) return true;
+      for (const [ddx, ddy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + ddx, ny = y + ddy;
+        if (nx >= 0 && ny >= 0 && nx < size && ny < size && (state.roads[st.key(nx, ny)] || isWarehouse(nx, ny))) return true;
+      }
+    }
+    return false;
+  }
+
   // 计算单个建筑状态:
   //   idle          无生产(民居/仓库)
   //   disconnected  未连通仓库(⚠️)
@@ -18,11 +41,18 @@
     const def = getDef(b.type);
     if (!def) return { status: 'idle', reason: 'unknown' };
     if (def.special === 'warehouse') return { status: 'idle', reason: 'none' };
+    // [B-53] 服务建筑不需要连仓库:沿路即服务(原版机制)
+    if (def.service) return { status: 'idle', reason: 'none' };
+    // [用户决策] 民居不需连仓库:仅要求接触任意道路(城市建造逻辑);生产建筑仍须连仓库物流
+    if (def.capacity && !def.production) {
+      return touchesAnyRoad(state, b, def) ? { status: 'idle', reason: 'none' } : { status: 'disconnected', reason: 'no-road' };
+    }
     if (!isConnected(state, b.id)) return { status: 'disconnected', reason: 'road-disconnected' };
     if (!def.production) return { status: 'idle', reason: 'none' };
     for (const [tier, need] of Object.entries(def.production.workforce || {})) {
       const have = state.population[tier] ? state.population[tier].count : 0;
-      if (have < need) return { status: 'waiting', reason: 'workforce-shortage', detail: { tier, need, have } };
+      // [岗位制 S1] 劳动力判定:总岗位池比例减产(结算处乘 eff);仅人口为 0 时整栋停产
+      if (have <= 0) return { status: 'waiting', reason: 'workforce-shortage', detail: { tier, need, have: 0 } };
     }
     for (const [good, qty] of Object.entries(def.production.inputs || {})) {
       if ((state.resources[good] || 0) < qty) return { status: 'waiting', reason: 'input-shortage', detail: { good, need: qty, have: state.resources[good] || 0 } };
@@ -51,23 +81,27 @@
 
   // [V1.10 修订②] 伐木营地未开发度:半径(方形)内可开发格(非水非山)中被建筑/道路占据的比例
   // 自身 footprint 计入占据(营地本身也是开发)
-  function developmentRatio(state, b, def) {
+  // [B-56] opts.selfCells:预览时把自身 footprint 计入占用(放置后自身在 grid 自动计入),保证预览=放置后一致
+  // [B-58] 分母=窗口有效格总数(平地+非平地):occupied 含非平地,若分母只算平地,海边/山边窗口 occupied>developable → dev>1 → 可开发% 变负
+  function developmentRatio(state, b, def, opts) {
     const r = def.production.radius;
     const bb = root.Engine.placement.footprintBounds(def, b.x, b.y, b.rot || 0); // [顺序11] 旋转后包围盒中心
     const cx = bb.x + Math.floor(bb.w / 2), cy = bb.y + Math.floor(bb.h / 2);
     const size = state.map.size;
-    let developable = 0, occupied = 0;
+    const selfSet = opts && opts.selfCells ? new Set(opts.selfCells.map((c) => st.key(c.x, c.y))) : null;
+    let developable = 0, nonFlat = 0, occupied = 0;
     for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
       const fx = cx + dx, fy = cy + dy;
       if (fx < 0 || fy < 0 || fx >= size || fy >= size) continue;
       const t = state.map.terrain[fy][fx];
       // [用户反馈] 非平地(水/山/矿/黏土)全部计入占用:这些地块不能种田/放牧,
       // 区域内的矿脉、水面、山脉都会降低开发度(可开发格 = 平地)
-      if (t !== 0) { occupied++; continue; }
+      if (t !== 0) { nonFlat++; occupied++; continue; }
       developable++;
-      if (state.grid[st.key(fx, fy)] || state.roads[st.key(fx, fy)]) occupied++;
+      if (state.grid[st.key(fx, fy)] || state.roads[st.key(fx, fy)] || (selfSet && selfSet.has(st.key(fx, fy)))) occupied++;
     }
-    return developable > 0 ? occupied / developable : 1;
+    const total = developable + nonFlat;
+    return total > 0 ? occupied / total : 1;
   }
   // 开发度 → 效率:≤25% 全效,≤50% 半效,≤75% 四分之一,>75% 停产
   function efficiencyFor(dev) {
@@ -83,6 +117,21 @@
     const o = opts || {};
     // [V1.10 修订⑤] 仓库服务覆盖道路(沿仓库路距离 radius 延伸),每 tick 算一次
     const warehouseRoads = root.Engine.population.serviceRoads(state, 'warehouse');
+    // [岗位制 S1] 每阶层岗位池:需求=Σ生产建筑 workforce;供给=该阶层人口;eff=min(1, 供给/需求)
+    const wf = {};
+    for (const tid of Object.keys(state.population)) wf[tid] = { need: 0, pop: 0, eff: 1 };
+    for (const b of Object.values(state.buildings)) {
+      const wdef = getDef(b.type);
+      if (!wdef || !wdef.production) continue;
+      for (const [tier, need] of Object.entries(wdef.production.workforce || {})) {
+        if (wf[tier]) wf[tier].need += need;
+      }
+    }
+    for (const tid of Object.keys(wf)) {
+      wf[tid].pop = (state.population[tid] || {}).count || 0;
+      wf[tid].eff = wf[tid].need > 0 ? Math.min(1, wf[tid].pop / wf[tid].need) : 1;
+    }
+    state._wf = wf;
     for (const b of Object.values(state.buildings)) {
       const def = getDef(b.type);
       const ns = computeStatus(state, b, { warehouseRoads });
@@ -148,6 +197,18 @@
               if (eff > 0) {
                 for (const g of Object.keys(def.production.outputs)) outputs[g] = def.production.outputs[g] * eff;
               }
+            }
+            // [岗位制 S1] 综合效率:radius 建筑=开发度效率×岗位效率;普通建筑=岗位效率(不修改 def)
+            let wfEff = 1;
+            for (const [tier] of Object.entries(def.production.workforce || {})) {
+              const w = state._wf && state._wf[tier];
+              if (w) wfEff = Math.min(wfEff, w.eff);
+            }
+            b.wfRatio = wfEff;
+            if (wfEff < 0.999) {
+              const scaled = {};
+              for (const [g, q] of Object.entries(outputs)) scaled[g] = q * wfEff;
+              outputs = scaled;
             }
             for (const [g, q] of Object.entries(outputs)) {
               state.resources[g] = (state.resources[g] || 0) + q;
