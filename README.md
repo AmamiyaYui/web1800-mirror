@@ -16,7 +16,6 @@
 - [AI 调用逻辑](#ai-调用逻辑)
 - [本地运行与测试](#本地运行与测试)
 - [部署到 Cloudflare](#部署到-cloudflare)
-- [DNS 与 HTTPS](#dns-与-https)
 - [留言板 Worker 与 D1](#留言板-worker-与-d1)
 - [安全与公开边界](#安全与公开边界)
 
@@ -321,9 +320,27 @@ assets/
 
 浏览器会下载并执行 JavaScript，因此运行代码可以通过开发者工具查看。`tools/deploy.sh` 只负责控制正式站点的文件范围，排除 `.git/`、内部文档、工具脚本和历史记录。
 
-### 2. 自动部署
+### 2. 绑定域名并启用 HTTPS
 
-Pages 连接 Git 后，向生产分支推送会触发新的构建。推荐顺序：
+当前站点使用 `web1800.top`，DNS 和证书都由 Cloudflare 管理。复现部署时按以下顺序配置：
+
+1. 在 Cloudflare 添加 `web1800.top`。如果域名尚未接入 Cloudflare，需要到注册商后台把 NS 改成 Cloudflare 分配的两条记录。
+2. 进入 Pages 项目的 **Custom domains**，添加 `web1800.top`。Cloudflare 会为 Pages 创建 DNS 记录并申请证书。
+3. 证书状态变为 **Active** 后，在 **SSL/TLS** 中开启 **Always Use HTTPS**。
+4. 如果需要 `www.web1800.top`，将它添加为第二个自定义域名，并重定向到主域。
+
+部署后可用下面的命令检查 NS、页面响应和证书：
+
+```bash
+nslookup -type=NS web1800.top 8.8.8.8
+curl -I https://web1800.top
+openssl s_client -connect web1800.top:443 -servername web1800.top </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+### 3. 自动部署
+
+Pages 连接 Git 后，向生产分支推送会触发新的构建：
 
 ```text
 修改
@@ -332,52 +349,8 @@ Pages 连接 Git 后，向生产分支推送会触发新的构建。推荐顺序
 → 检查 deploy/
 → commit / push
 → 等待 Pages 构建完成
-→ 验证 pages.dev 与自定义域名
+→ 验证 pages.dev 与 web1800.top
 ```
-
-## DNS 与 HTTPS
-
-当前线上域名为 `web1800.top`，DNS 由 Cloudflare 托管，HTTPS 证书由 Cloudflare 自动签发和续期。
-
-### DNS 做什么
-
-DNS 负责把 `web1800.top` 指向 Cloudflare Pages。若域名还不在 Cloudflare：
-
-1. 在 Cloudflare 选择 **Add a site**，输入域名。
-2. Cloudflare 会分配一对权威名称服务器（NS）。
-3. 到域名注册商后台，把原 NS 替换成 Cloudflare 给出的 NS。
-4. 等待 DNS 传播。通常几分钟到数小时，极端情况可能需要 48 小时。
-5. 在 Pages 项目中打开 **Custom domains**，添加 `web1800.top`。
-6. Cloudflare 会创建或提示创建对应 DNS 记录。
-
-不要把 `deploy/` 当成 DNS 目标。DNS 指向的是 Pages 提供的站点，`deploy/` 只是构建时产生的发布目录。
-
-### HTTPS 做什么
-
-HTTPS 在浏览器和 Cloudflare 边缘节点之间提供加密与站点身份校验。绑定自定义域名后，Cloudflare 通常会自动申请证书，不需要手动购买或上传证书。
-
-建议在 Cloudflare 中：
-
-- 保持 DNS 记录经过 Cloudflare 代理
-- 开启 **Always Use HTTPS**，把 HTTP 跳转到 HTTPS
-- 等证书状态变为 Active 后再正式分享域名
-- 若配置 `www.web1800.top`，将它作为额外自定义域名并重定向到主域
-
-### 验证命令
-
-```bash
-# 权威 NS 是否已经切到 Cloudflare
-nslookup -type=NS web1800.top 8.8.8.8
-
-# HTTPS 是否可访问、是否经过 Cloudflare
-curl -I https://web1800.top
-
-# 查看证书主题、签发者和有效期
-openssl s_client -connect web1800.top:443 -servername web1800.top </dev/null 2>/dev/null \
-  | openssl x509 -noout -subject -issuer -dates
-```
-
-只看到 DNS 生效不等于 HTTPS 已经签发；反过来，Pages 的 `pages.dev` 可访问也不代表自定义域名已经完成 NS 传播。这两步应分别验证。
 
 ## 留言板 Worker 与 D1
 
